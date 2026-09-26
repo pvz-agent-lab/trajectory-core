@@ -1,4 +1,4 @@
-"""The versioned public outcome contract (``trajectory-core.outcome.v1``).
+"""The versioned public outcome contract (``trajectory-core.outcome.v2``).
 
 The outcome contract separates facts that the old evaluation reports merged:
 
@@ -7,13 +7,22 @@ The outcome contract separates facts that the old evaluation reports merged:
 * the measured progress (completed rounds, maximum wave, final scene);
 * whether one full cycle completed (the historical ``full_cycle`` gate);
 * whether the *declared target* was reached;
-* the run lifecycle status, the termination reason and the truncation reason;
+* the run lifecycle status, the execution extent (not executed / partial /
+  complete / unknown), the termination reason and the truncation reason;
 * how well the document itself is verified.
 
 Unknown facts stay ``null``; a missing count is never read as ``false`` and a
 boolean is never accepted where a count belongs.  A complete cycle is **not**
 evidence that the declared target was reached: the two are separate fields and
-the validator rejects a document that contradicts itself.
+the validator rejects a document that contradicts itself.  The lifecycle
+status is likewise never read as goal success: a completed invocation may
+still report ``goal.reached = false``.  ``run.execution_extent`` is an
+independent axis that distinguishes a failure before any execution from a
+failure after partial execution and from a completed invocation; zero
+completed rounds is a recorded count and does not prove that nothing ran, so
+an unproven extent stays ``"unknown"``.  The v2 contract is the first
+published shape; v1 drafts were never released and are rejected as unknown
+schemas.
 
 The legacy adapter (:func:`outcome_from_legacy`) interprets a pre-migration
 ``lvz.evaluation-plan.v1/v2`` document plus a case report without changing the
@@ -33,11 +42,15 @@ from typing import Any
 from .errors import IncompleteEvidenceError, OutcomeContractError, UnsupportedSchemaError
 from .jsonio import digest_sha256, read_json
 
-OUTCOME_SCHEMA = "trajectory-core.outcome.v1"
+OUTCOME_SCHEMA = "trajectory-core.outcome.v2"
 OUTCOME_UNIT = "round"
 SUPPORTED_UNITS = frozenset({OUTCOME_UNIT})
 LEGACY_PLAN_SCHEMAS = frozenset({"lvz.evaluation-plan.v1", "lvz.evaluation-plan.v2"})
 RUN_STATUSES = frozenset({"completed", "failed", "aborted", "unknown"})
+# How much of the invocation actually executed; independent of goal success.
+# ``not_executed`` and ``partial`` must stay distinguishable from a completed
+# invocation, and an unproven extent must stay ``unknown``.
+EXECUTION_EXTENTS = frozenset({"not_executed", "partial", "complete", "unknown"})
 VERIFICATION_STATUSES = frozenset({"verified", "unverified", "failed", "unknown"})
 PROVENANCE_KINDS = frozenset({"native", "legacy-adapted", "synthetic-demo"})
 # The historical gate: one round is two flags and twenty waves.
@@ -56,7 +69,7 @@ _PLAN_KEYS = {"unit", "rounds"}
 _PROGRESS_KEYS = {"rounds_completed", "maximum_wave", "final_scene", "expected_scene"}
 _CYCLE_KEYS = {"completed", "basis"}
 _GOAL_KEYS = {"reached", "basis"}
-_RUN_KEYS = {"status", "termination_reason", "truncation_reason"}
+_RUN_KEYS = {"status", "execution_extent", "termination_reason", "truncation_reason"}
 _VERIFICATION_KEYS = {"status", "scope"}
 _PROVENANCE_KEYS = {"kind", "source", "input_schema", "evidence_scope", "adaptations"}
 
@@ -194,10 +207,25 @@ def validate_outcome(document: Any) -> dict[str, Any]:
     _require_exact_keys(run, "run", _RUN_KEYS)
     if run["status"] not in RUN_STATUSES:
         raise OutcomeContractError(f"run.status must be one of {sorted(RUN_STATUSES)}")
+    execution_extent = run["execution_extent"]
+    if execution_extent not in EXECUTION_EXTENTS:
+        raise OutcomeContractError(f"run.execution_extent must be one of {sorted(EXECUTION_EXTENTS)}")
     termination = _require_text(run["termination_reason"], "run.termination_reason", allow_none=True)
     truncation = _require_text(run["truncation_reason"], "run.truncation_reason", allow_none=True)
     if truncation is not None and truncation not in TRUNCATION_REASONS:
         raise OutcomeContractError(f"run.truncation_reason must be one of {sorted(TRUNCATION_REASONS)} or null")
+    if execution_extent == "not_executed":
+        executed = []
+        if progress["rounds_completed"]:
+            executed.append("progress.rounds_completed")
+        if progress["maximum_wave"]:
+            executed.append("progress.maximum_wave")
+        if executed:
+            raise OutcomeContractError(
+                f"run.execution_extent='not_executed' contradicts recorded progress ({', '.join(executed)})"
+            )
+    if execution_extent == "complete" and truncation is not None:
+        raise OutcomeContractError("run.execution_extent='complete' contradicts a recorded truncation_reason")
 
     verification = _require_object(document["verification"], "verification", _VERIFICATION_KEYS)
     _require_exact_keys(verification, "verification", _VERIFICATION_KEYS)
@@ -259,6 +287,7 @@ def validate_outcome(document: Any) -> dict[str, Any]:
     document["goal"] = {"reached": goal_reached, "basis": goal_basis}
     document["run"] = {
         "status": run["status"],
+        "execution_extent": execution_extent,
         "termination_reason": termination,
         "truncation_reason": truncation,
     }
@@ -284,6 +313,7 @@ def outcome_document(
     cycle_completed: bool | None = None,
     goal_reached: bool | None = None,
     run_status: str = "unknown",
+    execution_extent: str = "unknown",
     termination_reason: str | None = None,
     truncation_reason: str | None = None,
     verification_status: str = "unverified",
@@ -333,6 +363,7 @@ def outcome_document(
         "goal": {"reached": goal_reached, "basis": goal_basis},
         "run": {
             "status": run_status,
+            "execution_extent": execution_extent,
             "termination_reason": termination_reason,
             "truncation_reason": truncation_reason,
         },
@@ -387,6 +418,10 @@ class Outcome:
     @property
     def run_status(self) -> str:
         return str(self.document["run"]["status"])
+
+    @property
+    def execution_extent(self) -> str:
+        return str(self.document["run"]["execution_extent"])
 
     @property
     def termination_reason(self) -> str | None:
@@ -473,6 +508,29 @@ def _legacy_plan(document: Mapping[str, Any] | None) -> tuple[str | None, int | 
     return OUTCOME_UNIT, rounds, str(schema), adaptations
 
 
+def _legacy_execution_extent(status: str | None, progress: Mapping[str, Any], truncation: str | None) -> str:
+    """Derive only the execution extent the legacy facts actually prove.
+
+    ``startup_failed`` proves that no workload ran.  A completed status without
+    a truncation proves the invocation ran to its configured end, which says
+    nothing about goal success.  A failed or incomplete status proves partial
+    execution only when progress or a truncation reason is recorded; zero
+    completed rounds alone stays ``unknown`` because it cannot distinguish a
+    failure before execution from a partial first round.  Callers that know
+    more must declare the extent explicitly.
+    """
+    rounds = progress["rounds_completed"]
+    wave = progress["maximum_wave"]
+    ran = (rounds is not None and rounds >= 1) or (wave is not None and wave >= 1)
+    if status == "startup_failed":
+        return "not_executed"
+    if status == "completed":
+        return "partial" if truncation is not None else "complete"
+    if status in {"failed", "incomplete"} and (ran or truncation is not None):
+        return "partial"
+    return "unknown"
+
+
 def outcome_from_legacy(
     plan: Mapping[str, Any] | None,
     case: Mapping[str, Any],
@@ -481,13 +539,19 @@ def outcome_from_legacy(
     expected_scene: int | None = None,
     evidence_scope: str | None = None,
     input_schema: str | None = None,
+    execution_extent: str | None = None,
 ) -> Outcome:
-    """Adapt legacy plan/case documents to ``trajectory-core.outcome.v1``.
+    """Adapt legacy plan/case documents to ``trajectory-core.outcome.v2``.
 
     The adapter never re-verifies the legacy evidence: the adapted document is
     ``legacy-adapted`` and ``unverified``, and it records the exact input schema
     and every semantic adaptation.  ``full_cycle`` is reported as
     ``cycle.completed`` only; the declared target is decided separately.
+    ``execution_extent`` is derived conservatively from the legacy facts when
+    the caller does not declare it (``startup_failed`` -> ``not_executed``,
+    a completed status -> ``complete``, a failed/incomplete status with known
+    progress or truncation -> ``partial``, otherwise ``unknown``); an explicit
+    value must satisfy the outcome contract.
     """
     if not isinstance(case, Mapping):
         raise OutcomeContractError("legacy case report must be an object")
@@ -556,6 +620,20 @@ def outcome_from_legacy(
                 "legacy full_cycle=true requires the caller's expected_scene; the adapter will not guess a scene"
             )
 
+    progress = {
+        "rounds_completed": rounds_completed,
+        "maximum_wave": maximum_wave,
+        "final_scene": final_scene,
+        "expected_scene": expected_scene,
+    }
+    if execution_extent is None:
+        execution_extent = _legacy_execution_extent(status, progress, truncation)
+        adaptations.append(f"legacy case status {status!r} implies execution extent {execution_extent!r}")
+        if execution_extent == "unknown":
+            adaptations.append("the legacy case facts do not prove whether execution started; extent stays unknown")
+    else:
+        adaptations.append(f"the caller declared execution extent {execution_extent!r}")
+
     document = outcome_document(
         plan_unit=unit,
         plan_rounds=rounds,
@@ -565,6 +643,7 @@ def outcome_from_legacy(
         expected_scene=expected_scene,
         cycle_completed=full_cycle,
         run_status=run_status,
+        execution_extent=execution_extent,
         termination_reason=termination,
         truncation_reason=truncation,
         verification_status="unverified",

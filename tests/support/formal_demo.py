@@ -7,7 +7,7 @@ This is a test-only fixture, shared by the pytest suite and the public example
   the intervention branch and the intervention re-run;
 * two rerun reports produced by the legacy audit comparator
   (``compare_audits``) over the synthetic audit streams;
-* one ``trajectory-core.outcome.v1`` document per node, adapted from
+* one ``trajectory-core.outcome.v2`` document per node, adapted from
   synthetic legacy plan/case documents that reproduce the historical #97
   semantics (``flags_to_complete`` counted rounds; ``full_cycle`` is not goal
   completion);
@@ -89,6 +89,7 @@ def _legacy_outcome(
         evidence_scope="synthetic fixture values only; not a live game observation",
     )
     assert adapted.goal_reached is goal_reached, adapted.document
+    assert adapted.execution_extent == "complete", adapted.document
     return adapted
 
 
@@ -184,6 +185,11 @@ def build_formal_demo(workspace: str | Path) -> dict[str, Any]:
         _write_json(stage / "outcomes" / f"{key}.json", outcome.to_dict())
         outcome_paths[key] = f"outcomes/{key}.json"
 
+    receipt_artifacts = [
+        {"path": path.relative_to(stage).as_posix(), "sha256": tc.file_hash(path)}
+        for path in sorted(stage.rglob("*"))
+        if path.is_file()
+    ]
     receipt = {
         "schema": tc.PRODUCER_RECEIPT_SCHEMA,
         "producer": {"name": "synthetic fixture (tests/support/formal_demo.py)", "version": "issue3-demo"},
@@ -204,6 +210,7 @@ def build_formal_demo(workspace: str | Path) -> dict[str, Any]:
                 }
                 for node in summary.nodes
             ],
+            "artifacts": receipt_artifacts,
         },
     }
     _write_json(stage / "receipt.json", receipt)

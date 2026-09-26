@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from .closure import (
     CLOSURE_REPORT_SCHEMA,
+    CONTROLLED_FAMILY_PROFILE,
     FORMAL_CLOSURE_SCHEMA,
     PRODUCER_RECEIPT_SCHEMA,
     RERUN_REPORT_SCHEMA,
@@ -99,6 +100,7 @@ __all__ = [
     "PRODUCER_RECEIPT_SCHEMA",
     "RERUN_REPORT_SCHEMA",
     "CLOSURE_REPORT_SCHEMA",
+    "CONTROLLED_FAMILY_PROFILE",
     "content_identity",
     "chain_sha256",
     "end_boundary",

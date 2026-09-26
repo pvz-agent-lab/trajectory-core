@@ -17,10 +17,11 @@ the old API maps to the new one.
 | `lvz.reanimation-links.v1` | comparable animation state inside audit state | full trajectory load |
 | `lvz.lifecycle-*` | optional lifecycle recording contract | full trajectory load |
 | `lvz.issue99-shovel-fork-seal.v1` | a seal record for one tree plus reports | `verify_seal` |
-| `trajectory-core.outcome.v1` | a versioned run outcome (target unit, progress, cycle, goal, run/verification status) | `read_outcome` / `validate_outcome` / `outcome_from_legacy` |
-| `trajectory-core.formal-closure.v1` | the formal producer closure over a tree, outcomes, rerun pairs, receipt and inventory | `load_formal_closure` / `validate_formal_closure` / `seal_formal_closure` |
-| `trajectory-core.producer-closure-receipt.v1` | the producer's own `no_active_writers` declaration and its scope | `read_producer_receipt` |
+| `trajectory-core.outcome.v2` | a versioned run outcome (target unit, progress, cycle, goal, run status + execution extent, verification status) | `read_outcome` / `validate_outcome` / `outcome_from_legacy` |
+| `trajectory-core.formal-closure.v2` | the formal producer closure over a tree, outcomes, rerun pairs, receipt and inventory (profile `trajectory-core.controlled-family.v1`) | `load_formal_closure` / `validate_formal_closure` / `seal_formal_closure` |
+| `trajectory-core.producer-closure-receipt.v2` | the producer's own `no_active_writers` declaration, its tree/node scope and the complete producer-owned artifact scope | `read_producer_receipt` |
 | `trajectory-core.rerun-report.v1` | one baseline/rerun comparison bound to two tree nodes | `read_rerun_report` |
+| `trajectory-core.closure-report.v1` | the report a validated closure returns (`content_integrity` / `producer_attested_closure` / unverifiable claims; never re-reads bytes after load) | `FormalClosure.report` |
 
 Unknown schemas **fail closed** with `UnsupportedSchemaError`. A manifest is
 never upgraded in place: `content_identity` covers every field except
@@ -103,15 +104,20 @@ and only a file this call exclusively created is removed when writing fails
 
 `verify_seal()` reads the legacy `lvz.issue99-shovel-fork-seal.v1` record with
 an explicit `source_root` and never rewrites it.  The formal closure
-(`trajectory-core.formal-closure.v1`) is a different, stricter entry: it binds
+(`trajectory-core.formal-closure.v2`) is a different, stricter entry: it binds
 the tree, every node, one outcome per node, one baseline/rerun pair report per
-node, a producer receipt and the complete package inventory, and its loader
-and writer share one validation function.  A legacy seal is **never** accepted
-as a formal closure (and vice versa: `UnsupportedSchemaError`), and no formal
-status is ever inferred from an old record.  A formal closure's report
-separates core-verified content integrity from the producer's attestation and
-names the runtime claims core cannot prove; see
-[docs/outcome-closure-contract.md](docs/outcome-closure-contract.md).
+node, a producer receipt (whose artifact scope must equal the complete
+producer-owned inventory by path and digest), and the complete package
+inventory, and its loader and writer share one validation function.  A legacy
+seal is **never** accepted as a formal closure (and vice versa:
+`UnsupportedSchemaError`), and no formal status is ever inferred from an old
+record.  A loaded closure reports from an isolated validated snapshot, so
+later file or record mutation cannot change a reported decision.  A formal
+closure's report separates core-verified content integrity from the producer's
+attestation and names the runtime claims core cannot prove; see
+[docs/outcome-closure-contract.md](docs/outcome-closure-contract.md).  The
+pairing shape is the named `trajectory-core.controlled-family.v1` closure
+profile; generic tree/trajectory readers accept larger and unpaired trees.
 
 ## Deliberately unsupported
 

@@ -95,6 +95,7 @@ import trajectory_core as tc
 # Adapt a pre-migration plan/case pair without changing its historical unit.
 outcome = tc.outcome_from_legacy(plan_json, case_json, source="runs/issue97", expected_scene=3)
 print(outcome.plan_rounds, outcome.cycle_completed, outcome.goal_reached)
+print(outcome.run_status, outcome.execution_extent)   # lifecycle and extent are separate axes
 
 # Bind a complete experimental family: tree + outcomes + rerun reports +
 # producer receipt + the immutable input inventory.
@@ -106,17 +107,26 @@ closure = tc.seal_formal_closure(
     receipt="receipt.json",
 )
 report = tc.load_formal_closure("stage/closure.json").report()
+print(report["profile"])                              # trajectory-core.controlled-family.v1
 print(report["content_integrity"]["status"])          # verified: re-derived from bytes
 print(report["producer_attested_closure"]["synthetic"])  # true for a fixture receipt
 ```
 
 The outcome schema keeps the plan unit, the measured progress, one-cycle
-completion, target completion, run status, termination/truncation and
-verification separate; unknown facts stay unknown and a complete cycle is never
-read as goal completion.  The formal closure is a *producer protocol*, not a
-process check: the producer supplies the receipt (a `synthetic: true` receipt
-is a fixture, never runtime proof), and the report separates what core proved
-from bytes, what the producer attested, and what core cannot prove.
+completion, target completion, run status, execution extent (not executed /
+partial / complete / unknown), termination/truncation and verification
+separate; unknown facts stay unknown, a completed invocation with an unmet
+target is never success, and a complete cycle is never read as goal
+completion.  The formal closure is a *producer protocol*, not a process check:
+the producer supplies the receipt (a `synthetic: true` receipt is a fixture,
+never runtime proof), the receipt must bind the complete producer-owned
+artifact inventory by path and digest, and the report separates what core
+proved from bytes, what the producer attested, and what core cannot prove.
+A loaded closure reports from an isolated validated snapshot: later file or
+record mutation cannot change a reported decision.  The closure v2 profile is
+the named `trajectory-core.controlled-family.v1` shape (every node one outcome,
+one baseline/rerun pair role); the generic tree/trajectory APIs place no such
+restriction on larger or unpaired trees.
 
 A self-contained synthetic demo (two branches, two rerun reports, formal
 sealing and read-only verification) lives in
@@ -187,8 +197,10 @@ Negative cases cover tampering, missing files, unknown schemas, broken chains,
 duplicate identities, cross-root links, wrong parent boundaries, unsealed
 recordings, truncation, path traversal and read-only source inventories.
 Outcome and closure cases additionally cover boolean-as-count rejection,
-contradictory cycle/goal declarations, receipt scope conflicts, duplicated or
-omitted bindings, inventory changes during sealing, competing writers and
+contradictory cycle/goal declarations, execution-extent contradictions,
+receipt artifact-scope mismatches, re-sealing with a stale receipt,
+post-load report snapshot isolation, output-ownership races (including a
+same-payload competing writer), closure-file containment before any read, and
 failure cleanup.
 
 ## Layout

@@ -97,6 +97,7 @@ def test_adapt_outcome_cli(formal_lab: dict, tmp_path: Path) -> None:
     assert outcome["plan"] == {"unit": "round", "rounds": 2}
     assert outcome["cycle"]["completed"] is True
     assert outcome["goal"]["reached"] is False
+    assert outcome["run"]["execution_extent"] == "complete"
     assert outcome["provenance"]["kind"] == "legacy-adapted"
 
     plan.write_text('{"schema": "lvz.evaluation-plan.v99"}\n', encoding="utf-8")
@@ -112,8 +113,12 @@ def test_verify_closure_cli(formal_lab: dict, tmp_path: Path) -> None:
     assert report["content_integrity"]["status"] == "verified"
     assert report["producer_attested_closure"]["attested"] is False
     assert report["producer_attested_closure"]["synthetic"] is True
-    assert report["producer_attested_closure"]["scope"] == {"tree_id": report["tree_id"], "nodes": 4}
-    assert report["counts"] == {"nodes": 4, "outcomes": 4, "pairs": 2, "inputs": 32}
+    assert report["producer_attested_closure"]["scope"] == {
+        "tree_id": report["tree_id"],
+        "nodes": 4,
+        "producer_artifacts": 31,
+    }
+    assert report["counts"] == {"nodes": 4, "outcomes": 4, "pairs": 2, "inputs": 32, "producer_artifacts": 31}
 
 
 def test_verify_closure_cli_rejects_tampering(formal_lab: dict, tmp_path: Path) -> None:

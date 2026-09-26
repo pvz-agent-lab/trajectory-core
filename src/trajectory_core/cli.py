@@ -84,7 +84,7 @@ def _parser() -> argparse.ArgumentParser:
     )
 
     adapt = commands.add_parser(
-        "adapt-outcome", help="adapt a legacy evaluation plan/case pair to trajectory-core.outcome.v1"
+        "adapt-outcome", help="adapt a legacy evaluation plan/case pair to trajectory-core.outcome.v2"
     )
     adapt.add_argument("plan", type=Path, help="legacy plan document, or - when no plan is available")
     adapt.add_argument("case", type=Path)

@@ -17,19 +17,43 @@ prove by itself that no writer was active.  That epistemic split is explicit in
 A receipt is always a *separate file supplied by the caller*.  There is no
 boolean switch that fabricates one, and a synthetic receipt must say so: a
 closure bound to a synthetic receipt loads (it is a demo fixture), but its
-report never presents it as a producer's runtime proof.  Old
-``lvz.issue99-shovel-fork-seal.v1`` records stay readable through
-:func:`trajectory_core.verify_seal` only; loading one as a formal closure is an
-``UnsupportedSchemaError`` and formal status is never inferred from it.
+report never presents it as a producer's runtime proof.  Because a receipt that
+only names tree identities cannot attest bytes that changed afterwards, a v2
+receipt also binds the complete producer-owned artifact inventory (tree/index/
+node evidence, outcome files and rerun reports) by normalized path and digest,
+excluding the receipt and the closure file themselves.  Missing, extra or
+reused scope entries fail closed.  Old, narrower receipts are rejected as
+unknown schemas; they are never silently upgraded.
 
-The writer and the loader validate with the same function,
-:func:`validate_closure_record`; the writer additionally refuses an existing
-destination, detects input changes before and during the write, and only
-removes an output this call created.
+The v2 closure is the *controlled-family v1 profile*
+(:data:`CONTROLLED_FAMILY_PROFILE`): every tree node carries exactly one
+outcome and belongs to exactly one baseline/rerun pair in exactly one role.
+That is a deliberate versioned restriction of this narrow experiment family,
+not a limit of the generic tree/trajectory readers: larger or unpaired trees
+remain fully usable through ``load_tree`` / ``validate_tree`` and the other
+tree APIs.  Expanding the profile (single-arm closures, multi-pair designs) is
+a new profile decision, not a change to the generic core.
+
+A loaded :class:`FormalClosure` keeps an isolated snapshot of the validated
+record and receipt.  ``report()`` never re-reads the package: mutating files on
+disk or the dictionary returned by ``record`` after a successful load cannot
+turn a synthetic or invalid claim into a trusted one, and the report stays the
+snapshot that was actually verified (or the load fails).
+
+* ``lvz.issue99-shovel-fork-seal.v1`` records stay readable through
+  :func:`trajectory_core.verify_seal` only; loading one as a formal closure is
+  an ``UnsupportedSchemaError`` and formal status is never inferred from it.
+
+The writer and the loader validate with the same function; the writer
+additionally refuses an existing destination, detects input changes before and
+during the write, and only removes an output this call itself created (proved
+by the exclusive acquisition and the file identity it captured, never by byte
+equality with a competing writer's file).
 """
 
 from __future__ import annotations
 
+import copy
 import os
 import re
 from collections.abc import Iterable, Mapping
@@ -38,14 +62,15 @@ from typing import Any
 
 from ._paths import normalize_reference, require_within, resolve_under
 from .errors import ClosureError, IncompleteEvidenceError, PathContractError, UnsupportedSchemaError
-from .jsonio import canonical, digest_sha256, file_sha256, read_json, sha256_bytes
+from .jsonio import canonical, digest_sha256, file_sha256, read_json
 from .outcome import Outcome, read_outcome
 from .tree import load_tree
 
-FORMAL_CLOSURE_SCHEMA = "trajectory-core.formal-closure.v1"
-PRODUCER_RECEIPT_SCHEMA = "trajectory-core.producer-closure-receipt.v1"
+FORMAL_CLOSURE_SCHEMA = "trajectory-core.formal-closure.v2"
+PRODUCER_RECEIPT_SCHEMA = "trajectory-core.producer-closure-receipt.v2"
 RERUN_REPORT_SCHEMA = "trajectory-core.rerun-report.v1"
 CLOSURE_REPORT_SCHEMA = "trajectory-core.closure-report.v1"
+CONTROLLED_FAMILY_PROFILE = "trajectory-core.controlled-family.v1"
 CLOSURE_FILE = "closure.json"
 SUPPORTED_ATTESTATIONS = frozenset({"no_active_writers"})
 SUPPORTED_VERDICTS = frozenset({"equal", "different", "unverified"})
@@ -55,6 +80,7 @@ __all__ = [
     "PRODUCER_RECEIPT_SCHEMA",
     "RERUN_REPORT_SCHEMA",
     "CLOSURE_REPORT_SCHEMA",
+    "CONTROLLED_FAMILY_PROFILE",
     "SUPPORTED_ATTESTATIONS",
     "SUPPORTED_VERDICTS",
     "FormalClosure",
@@ -67,7 +93,7 @@ __all__ = [
 ]
 
 _SHA256 = re.compile(r"[0-9a-f]{64}")
-_CLOSURE_KEYS = {"schema", "closure_id", "tree", "outcomes", "pairs", "producer_receipt", "inputs"}
+_CLOSURE_KEYS = {"schema", "profile", "closure_id", "tree", "outcomes", "pairs", "producer_receipt", "inputs"}
 _TREE_KEYS = {"path", "tree_id", "nodes"}
 _NODE_BINDING_KEYS = {"key", "branch_id", "trunk", "parent_key", "trajectory_id", "manifest_sha256"}
 _OUTCOME_KEYS = {"key", "trajectory_id", "path", "sha256", "outcome_id"}
@@ -76,8 +102,9 @@ _REFERENCE_KEYS = {"path", "sha256"}
 _INPUT_KEYS = {"path", "sha256"}
 _RECEIPT_KEYS = {"schema", "producer", "synthetic", "attestation", "statement", "method", "scope"}
 _PRODUCER_KEYS = {"name", "version"}
-_RECEIPT_SCOPE_KEYS = {"tree_id", "nodes"}
+_RECEIPT_SCOPE_KEYS = {"tree_id", "nodes", "artifacts"}
 _SCOPE_NODE_KEYS = {"key", "trajectory_id", "manifest_sha256"}
+_SCOPE_ARTIFACT_KEYS = {"path", "sha256"}
 _RERUN_REQUIRED_KEYS = {"schema", "baseline", "rerun", "verdict", "synthetic"}
 _RERUN_OPTIONAL_KEYS = {"detail"}
 _RERUN_IDENTITY_KEYS = {"key", "trajectory_id"}
@@ -164,10 +191,13 @@ def _inventory(root: Path, *, exclude: Path | None = None) -> list[dict[str, str
 def read_producer_receipt(path: str | Path) -> dict[str, Any]:
     """Read and strictly validate one producer closure receipt.
 
-    The receipt is the producer's declaration that its writers stopped and
-    which identities that covers.  ``synthetic`` is required and must be an
-    explicit boolean: there is no default, so a fixture can never quietly pass
-    as a live producer's proof.
+    The receipt is the producer's declaration that its writers stopped, which
+    identities that covers and which producer-owned artifacts it closes.  A v2
+    receipt must bind every producer-owned artifact (the complete package
+    inventory except the receipt itself) by normalized path and digest; the
+    closure validator proves that equality against the package.  ``synthetic``
+    is required and must be an explicit boolean: there is no default, so a
+    fixture can never quietly pass as a live producer's proof.
     """
     receipt_path = Path(path)
     if not receipt_path.is_file():
@@ -195,16 +225,31 @@ def read_producer_receipt(path: str | Path) -> dict[str, Any]:
     scope = _object(record["scope"], "producer receipt scope")
     _exact(scope, "producer receipt scope", _RECEIPT_SCOPE_KEYS)
     _sha(scope["tree_id"], "producer receipt scope tree_id")
-    seen: set[str] = set()
+    seen_nodes: set[str] = set()
     for entry in _list(scope["nodes"], "producer receipt scope nodes"):
         binding = _object(entry, "producer receipt scope node")
         _exact(binding, "producer receipt scope node", _SCOPE_NODE_KEYS)
         key = _text(binding["key"], "producer receipt scope node key")
-        if key in seen:
+        if key in seen_nodes:
             raise ClosureError(f"producer receipt scope binds node {key!r} more than once")
-        seen.add(key)
+        seen_nodes.add(key)
         _sha(binding["trajectory_id"], f"producer receipt scope node {key!r} trajectory_id")
         _sha(binding["manifest_sha256"], f"producer receipt scope node {key!r} manifest_sha256")
+    artifacts: list[dict[str, str]] = []
+    seen_artifacts: set[str] = set()
+    for entry in _list(scope["artifacts"], "producer receipt scope artifacts"):
+        binding = _object(entry, "producer receipt scope artifact")
+        _exact(binding, "producer receipt scope artifact", _SCOPE_ARTIFACT_KEYS)
+        reference = normalize_reference(_text(binding["path"], "producer receipt scope artifact path"))
+        if reference in seen_artifacts:
+            raise ClosureError(f"producer receipt scope binds artifact {reference!r} more than once")
+        seen_artifacts.add(reference)
+        artifacts.append(
+            {
+                "path": reference,
+                "sha256": _sha(binding["sha256"], f"producer receipt scope artifact {reference!r} sha256"),
+            }
+        )
     return {
         "schema": PRODUCER_RECEIPT_SCHEMA,
         "producer": {"name": producer["name"], "version": producer["version"]},
@@ -212,7 +257,7 @@ def read_producer_receipt(path: str | Path) -> dict[str, Any]:
         "attestation": record["attestation"],
         "statement": record["statement"],
         "method": record["method"],
-        "scope": {"tree_id": scope["tree_id"], "nodes": list(scope["nodes"])},
+        "scope": {"tree_id": scope["tree_id"], "nodes": list(scope["nodes"]), "artifacts": artifacts},
     }
 
 
@@ -294,14 +339,42 @@ def _check_receipt_scope(receipt: Mapping[str, Any], tree_id: str, nodes: Mappin
                 raise ClosureError(f"producer receipt scope node {key!r} {field} conflicts with the bound node")
 
 
-def validate_closure_record(record: Any, root: str | Path, *, closure_file: str | Path | None = None) -> dict[str, Any]:
-    """The single validation contract used by both the loader and the writer.
+def _check_receipt_artifacts(
+    receipt: Mapping[str, Any], receipt_relative: str, actual_inputs: list[dict[str, str]]
+) -> None:
+    """Prove the receipt's artifact scope is exactly the producer-owned inventory.
 
-    Re-derives the tree, every node digest, every outcome identity, every rerun
-    report identity, the producer receipt scope and the complete input
-    inventory.  Missing, duplicated, omitted or extra references, bad digests,
-    unknown schemas and conflicting identities all raise ``ClosureError`` (or a
-    more specific subclass).
+    The producer-owned inventory is every inventoried package file except the
+    receipt itself (and the closure file, which the inventory already
+    excludes), so the receipt and closure can never be part of their own
+    scope.  Both path and digest must match; a missing, extra, reused or
+    changed entry fails.
+    """
+    producer_artifacts = sorted(
+        (item for item in actual_inputs if item["path"] != receipt_relative), key=lambda item: item["path"]
+    )
+    declared_artifacts = sorted(receipt["scope"]["artifacts"], key=lambda item: item["path"])
+    if declared_artifacts == producer_artifacts:
+        return
+    declared = {item["path"]: item["sha256"] for item in declared_artifacts}
+    present = {item["path"]: item["sha256"] for item in producer_artifacts}
+    missing = sorted(set(present) - set(declared))
+    extra = sorted(set(declared) - set(present))
+    changed = sorted(path for path in set(declared) & set(present) if declared[path] != present[path])
+    raise ClosureError(
+        "producer receipt scope artifacts do not match the producer-owned package contents "
+        f"(uncovered: {missing or 'none'}, out of scope: {extra or 'none'}, changed: {changed or 'none'})"
+    )
+
+
+def _validate_closure_record(
+    record: Any, root: str | Path, *, closure_file: str | Path | None = None
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Validate one closure record and return it with its validated receipt.
+
+    The public :func:`validate_closure_record` returns only the record; the
+    loader additionally keeps the isolated, already validated receipt snapshot
+    so :meth:`FormalClosure.report` never has to re-read package bytes.
     """
     package_root = Path(root)
     if not package_root.is_dir():
@@ -314,6 +387,10 @@ def validate_closure_record(record: Any, root: str | Path, *, closure_file: str 
             f"unsupported closure schema {record.get('schema')!r}; defined: {FORMAL_CLOSURE_SCHEMA!r}"
         )
     _exact(record, "closure record", _CLOSURE_KEYS)
+    if record["profile"] != CONTROLLED_FAMILY_PROFILE:
+        raise UnsupportedSchemaError(
+            f"unsupported closure profile {record['profile']!r}; defined: {CONTROLLED_FAMILY_PROFILE!r}"
+        )
     declared_id = _sha(record["closure_id"], "closure_id")
     if digest_sha256({key: value for key, value in record.items() if key != "closure_id"}) != declared_id:
         raise ClosureError("closure_id does not match the canonical record content")
@@ -358,6 +435,7 @@ def validate_closure_record(record: Any, root: str | Path, *, closure_file: str 
     if file_sha256(receipt_path) != _sha(receipt_reference["sha256"], "producer receipt sha256"):
         raise ClosureError("producer receipt digest does not match the sealed bytes")
     receipt = read_producer_receipt(receipt_path)
+    receipt_relative = receipt_path.relative_to(package_root).as_posix()
     _check_receipt_scope(receipt, tree.tree_id, actual_nodes)
 
     outcome_entries: list[dict[str, Any]] = []
@@ -448,17 +526,46 @@ def validate_closure_record(record: Any, root: str | Path, *, closure_file: str 
             "closure inventory does not match the package contents "
             f"(unrecorded files: {missing or 'none'}, unreadable records: {extra or 'none'}, or a digest changed)"
         )
+    _check_receipt_artifacts(receipt, receipt_relative, actual_inputs)
 
-    return record
+    return record, receipt
+
+
+def validate_closure_record(record: Any, root: str | Path, *, closure_file: str | Path | None = None) -> dict[str, Any]:
+    """The single validation contract used by both the loader and the writer.
+
+    Re-derives the tree, every node digest, every outcome identity, every rerun
+    report identity, the producer receipt tree/node scope and complete
+    producer-owned artifact inventory, and the complete input inventory.
+    Missing, duplicated, omitted or extra references, bad digests, unknown
+    schemas and conflicting identities all raise ``ClosureError`` (or a more
+    specific subclass).
+    """
+    validated, _receipt = _validate_closure_record(record, root, closure_file=closure_file)
+    return validated
 
 
 class FormalClosure:
-    """A validated formal closure record bound to its package directory."""
+    """A validated formal closure record bound to its package directory.
 
-    def __init__(self, directory: Path, path: Path, record: dict[str, Any]) -> None:
+    Construction is internal to loading/sealing: the instance keeps isolated
+    copies of the validated record and receipt, so neither a later file change
+    nor mutation of the public ``record`` snapshot can alter a reported
+    decision.
+    """
+
+    def __init__(
+        self,
+        directory: Path,
+        path: Path,
+        record: dict[str, Any],
+        *,
+        receipt: Mapping[str, Any] | None = None,
+    ) -> None:
         self._directory = directory
         self._path = path
-        self._record = record
+        self._record = copy.deepcopy(record)
+        self._receipt: dict[str, Any] | None = copy.deepcopy(dict(receipt)) if receipt is not None else None
 
     @property
     def directory(self) -> Path:
@@ -470,7 +577,8 @@ class FormalClosure:
 
     @property
     def record(self) -> dict[str, Any]:
-        return self._record
+        """An isolated copy of the validated record; mutating it is harmless."""
+        return copy.deepcopy(self._record)
 
     @property
     def closure_id(self) -> str:
@@ -481,22 +589,41 @@ class FormalClosure:
         return str(self._record["tree"]["tree_id"])
 
     @property
+    def profile(self) -> str:
+        return str(self._record["profile"])
+
+    @property
     def counts(self) -> dict[str, int]:
-        return {
+        counts = {
             "nodes": len(self._record["tree"]["nodes"]),
             "outcomes": len(self._record["outcomes"]),
             "pairs": len(self._record["pairs"]),
             "inputs": len(self._record["inputs"]),
         }
+        if self._receipt is not None:
+            counts["producer_artifacts"] = len(self._receipt["scope"]["artifacts"])
+        return counts
 
     def report(self) -> dict[str, Any]:
-        """The validated report, with the producer claim kept epistemically separate."""
-        receipt = read_producer_receipt(resolve_under(self._directory, str(self._record["producer_receipt"]["path"])))
+        """The validated snapshot report, with the producer claim kept separate.
+
+        Nothing here re-reads the package: the receipt and the record were
+        validated when this instance was loaded, and both are held as isolated
+        copies.  A file changed after loading therefore never changes this
+        report, and a synthetic receipt is never promoted to a trusted claim.
+        """
+        if self._receipt is None:
+            raise ClosureError(
+                "this formal closure was not built from a validated load; call load_formal_closure or "
+                "seal_formal_closure instead of constructing FormalClosure directly"
+            )
+        receipt = self._receipt
         counts = self.counts
         accepted = receipt["synthetic"] is False
         return {
             "schema": CLOSURE_REPORT_SCHEMA,
             "path": str(self._path),
+            "profile": self.profile,
             "closure_id": self.closure_id,
             "status": "valid",
             "tree_id": self.tree_id,
@@ -504,7 +631,8 @@ class FormalClosure:
                 "status": "verified",
                 "scope": (
                     "re-derived tree identity and chains, every node manifest digest, every outcome identity, "
-                    "every rerun report binding, the producer receipt scope and the complete input inventory"
+                    "every rerun report binding, the producer receipt tree/node scope and complete "
+                    "producer-owned artifact path/digest scope, and the complete input inventory"
                 ),
                 "runtime_facts_verified_by_core": False,
             },
@@ -515,9 +643,14 @@ class FormalClosure:
                 "producer": dict(receipt["producer"]),
                 "statement": receipt["statement"],
                 "method": receipt["method"],
-                "scope": {"tree_id": self.tree_id, "nodes": counts["nodes"]},
+                "scope": {
+                    "tree_id": self.tree_id,
+                    "nodes": counts["nodes"],
+                    "producer_artifacts": len(receipt["scope"]["artifacts"]),
+                },
                 "core_checks": (
-                    "receipt schema and scope equality with the bound tree nodes; the attesting runtime fact "
+                    "receipt schema; tree/node scope equality with the bound tree nodes; artifact path/digest "
+                    "equality with the complete producer-owned package inventory; the attesting runtime fact "
                     "itself is not verifiable offline"
                 ),
             },
@@ -525,12 +658,7 @@ class FormalClosure:
                 receipt["statement"],
                 "trajectory-core cannot observe a game, a writer process or the absence of an active writer",
             ],
-            "counts": {
-                "nodes": counts["nodes"],
-                "outcomes": counts["outcomes"],
-                "pairs": counts["pairs"],
-                "inputs": counts["inputs"],
-            },
+            "counts": counts,
             "problems": [],
         }
 
@@ -541,14 +669,26 @@ def _closure_file(path: str | Path) -> Path:
 
 
 def load_formal_closure(path: str | Path, *, root: str | Path | None = None) -> FormalClosure:
-    """Read and fully validate one formal closure record (directory or file)."""
+    """Read and fully validate one formal closure record (directory or file).
+
+    The closure file itself is bounded before ``read_json``: an explicit root
+    must contain it (after symlink resolution), and a symlinked closure record
+    is rejected even when the link stays inside the package, so no byte of a
+    record outside the declared package is ever opened.
+    """
     closure_path = _closure_file(path)
+    package_root = Path(root) if root is not None else closure_path.parent
+    if not package_root.is_dir():
+        raise ClosureError(f"closure package root is not a directory: {package_root}")
+    package_root = package_root.resolve()
+    require_within(package_root, closure_path, label="formal closure record")
+    if closure_path.is_symlink():
+        raise PathContractError(f"a formal closure record must not be a symlink: {closure_path}")
     if not closure_path.is_file():
         raise IncompleteEvidenceError(f"formal closure record is missing: {closure_path}")
-    package_root = Path(root) if root is not None else closure_path.parent
     record = read_json(closure_path)
-    validate_closure_record(record, package_root, closure_file=closure_path)
-    return FormalClosure(Path(package_root).resolve(), closure_path, record)
+    validated, receipt = _validate_closure_record(record, package_root, closure_file=closure_path)
+    return FormalClosure(package_root, closure_path, validated, receipt=receipt)
 
 
 def validate_formal_closure(path: str | Path, *, root: str | Path | None = None) -> dict[str, Any]:
@@ -556,30 +696,45 @@ def validate_formal_closure(path: str | Path, *, root: str | Path | None = None)
     return load_formal_closure(path, root=root).report()
 
 
-def _write_record(destination: Path, payload: bytes) -> None:
-    """Acquire the destination exclusively, or report the competing writer's file.
+def _write_record(destination: Path, payload: bytes) -> tuple[int, int]:
+    """Acquire the destination exclusively and write ``payload``.
 
-    A failure after acquisition removes only the file this call created; the
-    caller checks the payload digest before the post-write cleanup.
+    Returns the device/inode identity of the file this call created.  A
+    ``FileExistsError`` means a competing writer owns the destination and
+    nothing is removed.  A failure after acquisition removes only the file
+    whose identity matches the one this call captured.
     """
     try:
         stream = destination.open("xb")
     except FileExistsError:
         raise ClosureError(f"formal closure destination already exists: {destination}") from None
+    identity: tuple[int, int] | None = None
     try:
         with stream:
+            stat = os.fstat(stream.fileno())
+            identity = (stat.st_dev, stat.st_ino)
             stream.write(payload)
             stream.flush()
     except BaseException:
-        destination.unlink(missing_ok=True)
+        _remove_owned_output(destination, identity)
         raise
+    return identity
 
 
-def _remove_if_payload(destination: Path, payload: bytes) -> None:
-    """Remove a failed output only while it still holds the bytes this call wrote."""
+def _remove_owned_output(destination: Path, identity: tuple[int, int] | None) -> None:
+    """Remove a failed output only while it is still the file this call created.
+
+    ``identity`` is captured from this call's exclusive acquisition; a path
+    that no longer resolves to that file belongs to a competing writer and is
+    left untouched.  Byte equality is never used as ownership proof.
+    """
+    if identity is None:
+        return
     try:
-        if destination.is_file() and file_sha256(destination) == sha256_bytes(payload):
-            destination.unlink()
+        current = os.stat(destination)
+        if (current.st_dev, current.st_ino) != identity:
+            return
+        destination.unlink()
     except OSError:
         pass
 
@@ -622,11 +777,13 @@ def seal_formal_closure(
 ) -> FormalClosure:
     """Write a formal closure over an existing, unchanged package.
 
-    Every referenced artifact must already exist; the record is built from the
-    bytes on disk, validated with the same contract the loader uses, and then
-    written with an exclusive create.  An existing destination is never
-    overwritten, and input changes before or during the write abort the seal
-    and leave no output this call can be mistaken for a successful closure.
+    Every referenced artifact must already exist and the producer receipt must
+    already bind the complete producer-owned artifact inventory; the record is
+    built from the bytes on disk, validated with the same contract the loader
+    uses, and then written with an exclusive create.  An existing destination is
+    never overwritten, a competing writer's file is never removed (byte
+    equality is not ownership), and input changes before or during the write
+    abort the seal.
     """
     root = Path(package_root)
     if not root.is_dir():
@@ -656,6 +813,7 @@ def seal_formal_closure(
     inputs = _inventory(root)
     record: dict[str, Any] = {
         "schema": FORMAL_CLOSURE_SCHEMA,
+        "profile": CONTROLLED_FAMILY_PROFILE,
         "tree": {
             "path": tree_reference,
             "tree_id": tree_view.tree_id,
@@ -670,14 +828,15 @@ def seal_formal_closure(
         "inputs": inputs,
     }
     record["closure_id"] = digest_sha256(record)
-    validate_closure_record(record, root, closure_file=destination_path)
+    validated, receipt_snapshot = _validate_closure_record(record, root, closure_file=destination_path)
 
-    payload = canonical(record) + b"\n"
+    payload = canonical(validated) + b"\n"
+    identity: tuple[int, int] | None = None
     try:
-        _write_record(destination_path, payload)
+        identity = _write_record(destination_path, payload)
         if _inventory(root, exclude=destination_path) != inputs:
             raise ClosureError("package inputs changed while the formal closure was being written")
     except BaseException:
-        _remove_if_payload(destination_path, payload)
+        _remove_owned_output(destination_path, identity)
         raise
-    return FormalClosure(root, destination_path, record)
+    return FormalClosure(root, destination_path, validated, receipt=receipt_snapshot)

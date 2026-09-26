@@ -82,6 +82,7 @@ def test_missing_facts_stay_unknown() -> None:
     assert outcome.cycle_completed is None
     assert outcome.goal_reached is None
     assert outcome.run_status == "unknown"
+    assert outcome.execution_extent == "unknown"
     assert outcome.termination_reason is None
     assert outcome.truncation_reason is None
     assert outcome.verification_status == "unverified"
@@ -171,9 +172,95 @@ def test_unknown_case_status_is_rejected() -> None:
 
 
 def test_legacy_statuses_map_to_the_public_run_status() -> None:
-    assert adapt(legacy_plan(), legacy_case(status="failed")).run_status == "failed"
-    assert adapt(legacy_plan(), legacy_case(status="startup_failed")).run_status == "failed"
-    assert adapt(legacy_plan(), legacy_case(status="incomplete")).run_status == "aborted"
+    completed = adapt(legacy_plan(), legacy_case(status="completed"))
+    assert completed.run_status == "completed"
+    assert completed.execution_extent == "complete"
+    failed = adapt(legacy_plan(), legacy_case(status="failed"))
+    assert failed.run_status == "failed"
+    assert failed.execution_extent == "partial"
+    startup_failed = adapt(
+        legacy_plan(),
+        legacy_case(status="startup_failed", rounds_completed=None, maximum_wave=None, full_cycle=None),
+    )
+    assert startup_failed.run_status == "failed"
+    assert startup_failed.execution_extent == "not_executed"
+    incomplete = adapt(legacy_plan(), legacy_case(status="incomplete"))
+    assert incomplete.run_status == "aborted"
+    assert incomplete.execution_extent == "partial"
+
+
+def test_a_startup_failure_with_recorded_progress_is_rejected() -> None:
+    with pytest.raises(tc.OutcomeContractError, match="not_executed"):
+        adapt(legacy_plan(), legacy_case(status="startup_failed"))
+
+
+def test_failure_before_execution_is_distinct_from_failure_after_partial_execution() -> None:
+    before = adapt(
+        legacy_plan(),
+        legacy_case(status="startup_failed", rounds_completed=None, maximum_wave=None, full_cycle=None),
+    )
+    assert before.run_status == "failed"
+    assert before.execution_extent == "not_executed"
+    after = adapt(legacy_plan(), legacy_case(status="failed", rounds_completed=1))
+    assert after.run_status == "failed"
+    assert after.execution_extent == "partial"
+    # Zero completed rounds cannot prove that nothing ran: the first round may
+    # have been partial and unrecorded, so the extent must stay unknown.
+    ambiguous = adapt(
+        legacy_plan(),
+        legacy_case(status="failed", rounds_completed=0, maximum_wave=0, full_cycle=None),
+    )
+    assert ambiguous.run_status == "failed"
+    assert ambiguous.execution_extent == "unknown"
+
+
+def test_a_truncated_run_is_partial_not_complete() -> None:
+    truncated = adapt(legacy_plan(), legacy_case(status="incomplete", outcome="tick_budget_exhausted"))
+    assert truncated.run_status == "aborted"
+    assert truncated.execution_extent == "partial"
+    assert truncated.truncation_reason == "tick_budget_exhausted"
+
+
+def test_completed_invocation_with_an_unmet_goal_is_not_success() -> None:
+    outcome = adapt(legacy_plan(flags_to_complete=2), legacy_case(outcome="terminal_before_complete"))
+    assert outcome.run_status == "completed"
+    assert outcome.execution_extent == "complete"
+    assert outcome.cycle_completed is True
+    assert outcome.goal_reached is False
+
+
+def test_explicit_execution_extent_must_satisfy_the_contract() -> None:
+    declared = adapt(
+        legacy_plan(),
+        legacy_case(status="failed", rounds_completed=0, full_cycle=None),
+        execution_extent="partial",
+    )
+    assert declared.execution_extent == "partial"
+    assert any("caller declared execution extent" in note for note in declared.provenance["adaptations"])
+    with pytest.raises(tc.OutcomeContractError, match="execution_extent"):
+        adapt(legacy_plan(), legacy_case(), execution_extent="teleported")
+
+
+def test_execution_extent_contradictions_are_rejected() -> None:
+    with pytest.raises(tc.OutcomeContractError, match="not_executed"):
+        tc.outcome_document(
+            rounds_completed=1,
+            maximum_wave=20,
+            run_status="failed",
+            execution_extent="not_executed",
+            provenance_kind="native",
+            provenance_source="unit-test",
+        )
+    with pytest.raises(tc.OutcomeContractError, match="truncation"):
+        tc.outcome_document(
+            rounds_completed=1,
+            maximum_wave=20,
+            run_status="aborted",
+            execution_extent="complete",
+            truncation_reason="tick_budget_exhausted",
+            provenance_kind="native",
+            provenance_source="unit-test",
+        )
 
 
 def test_truncation_reasons_stay_separate_from_termination() -> None:
@@ -251,7 +338,7 @@ def test_unknown_fields_and_schemas_are_rejected() -> None:
     with pytest.raises(tc.OutcomeContractError, match="unknown fields"):
         tc.validate_outcome(document)
     document = tc.outcome_document(provenance_kind="native", provenance_source="unit-test")
-    document["schema"] = "trajectory-core.outcome.v2"
+    document["schema"] = "trajectory-core.outcome.v99"
     with pytest.raises(tc.UnsupportedSchemaError):
         tc.validate_outcome(document)
 
