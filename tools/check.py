@@ -10,10 +10,12 @@ Runs, in order:
 4. sdist + wheel build into ``dist/``;
 5. a fresh ``venv`` install of the wheel with ``--no-deps`` and ``pip check``;
 6. fixture creation and CLI execution from a temporary directory outside the
-   repository, using only the installed package.
+   repository, using only the installed package;
+7. the public two-branch + two-rerun formal-closure example and the installed
+   ``verify-closure`` CLI, again from outside the repository.
 
-The last two steps are what make the build claim real: nothing from the source
-tree is importable from the clean environment.
+The last three steps are what make the build claim real: nothing from the
+source tree is importable from the clean environment.
 """
 
 from __future__ import annotations
@@ -72,8 +74,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--skip-build", action="store_true", help="stop after the test suite")
     args = parser.parse_args(argv)
 
-    run([sys.executable, "-m", "ruff", "check", "src", "tests", "tools"])
-    run([sys.executable, "-m", "ruff", "format", "--check", "src", "tests", "tools"])
+    run([sys.executable, "-m", "ruff", "check", "src", "tests", "tools", "examples"])
+    run([sys.executable, "-m", "ruff", "format", "--check", "src", "tests", "tools", "examples"])
     run([sys.executable, "-m", "mypy"])
     run([sys.executable, "-X", "dev", "-m", "pytest", "tests"], env=clean_env())
     print("static checks, types and tests passed", flush=True)
@@ -109,7 +111,30 @@ def main(argv: list[str] | None = None) -> int:
             raise SystemExit("installed CLI summary does not match the built trajectory")
         version = run([executable, "--version"], cwd=workspace, env=clean_env())
         print(version.stdout.strip())
+
+        example = ROOT / "examples" / "formal_closure_two_branches.py"
+        demo = run(
+            [python, example, workspace / "closure-demo", "--support", ROOT / "tests"],
+            cwd=workspace,
+            env=clean_env(),
+        )
+        for expected in (
+            "content_integrity=verified",
+            "producer_attested=False",
+            "synthetic_receipt=True",
+            "read_only_inventory_stable=True",
+        ):
+            if expected not in demo.stdout:
+                raise SystemExit(f"formal-closure example output is missing {expected!r}")
+        closure = run(
+            [executable, "verify-closure", workspace / "closure-demo" / "stage" / "closure.json"],
+            cwd=workspace,
+            env=clean_env(),
+        )
+        if '"status": "valid"' not in closure.stdout:
+            raise SystemExit("installed CLI did not validate the example formal closure")
         print("clean-venv wheel install and outside-repository CLI checks passed", flush=True)
+        print("installed formal-closure example and verify-closure CLI passed", flush=True)
     return 0
 
 

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "trajectory-core"
-version = "0.1.0"
+version = "0.2.0"
 description = "Offline lvz trajectory and evidence-tree contracts, readers and validation"
 readme = "README.md"
 license = "GPL-3.0-only"
@@ -47,7 +47,7 @@ filterwarnings = ["error"]
 [tool.ruff]
 line-length = 120
 target-version = "py311"
-src = ["src", "tests", "tools"]
+src = ["src", "tests", "tools", "examples"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
