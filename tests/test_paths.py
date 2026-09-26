@@ -28,6 +28,33 @@ def test_legacy_windows_separators_normalize_without_host_rules() -> None:
         normalize_reference("work\\..\\..\\escape.json", legacy_windows=True)
 
 
+@pytest.mark.parametrize(
+    "reference",
+    [
+        "C:/Windows/system32",
+        "C:relative",
+        "a:b",
+        r"\\server\share\x",
+        "//server/share/x",
+        r"\absolute",
+        "../x",
+    ],
+)
+def test_unsafe_references_are_rejected_host_neutrally(reference: str) -> None:
+    with pytest.raises(PathContractError):
+        normalize_reference(reference, legacy_windows=False)
+    with pytest.raises(PathContractError):
+        normalize_reference(reference, legacy_windows=True)
+
+
+def test_backslash_separators_are_normalized_on_every_host() -> None:
+    assert normalize_reference(r"work\report.json") == "work/report.json"
+    with pytest.raises(PathContractError):
+        normalize_reference(r"work\..\..\escape.json")
+    with pytest.raises(PathContractError):
+        normalize_reference(r"C:\outside")
+
+
 def test_resolve_under_refuses_symlink_escape(tmp_path: Path) -> None:
     root = tmp_path / "root"
     outside = tmp_path / "outside"

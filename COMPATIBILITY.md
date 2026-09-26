@@ -32,8 +32,8 @@ silently accepted as the old identity.
 | `EvidenceError` | bytes are valid JSON but the evidence is wrong (hash chain, digest, schema content) |
 | `UnsupportedSchemaError` | the declared schema/version is not one of the formats above |
 | `IncompleteEvidenceError` | a complete artifact is missing a file, a manifest or a close |
-| `PathContractError` | a reference is absolute, traversing, drive/UNC-prefixed or a symlink escape |
-| `SealError` | a seal record or `source_root` is malformed |
+| `PathContractError` | a reference is absolute, traversing, drive/UNC-prefixed or a symlink escape; the grammar is host-neutral, so backslashes are read as separators on every OS |
+| `SealError` | a seal record or `source_root` is malformed: wrong container type, duplicate node/report declarations, missing required fields or unreadable output state |
 | `UnsupportedCapabilityError` | a capability that is deliberately not part of this package (never a silent success) |
 
 A *partial read* is always explicit: `inspect_tree()` reports
@@ -48,7 +48,7 @@ A *partial read* is always explicit: `inspect_tree()` reports
 | `engine_replay.Trajectory.load(path)` | `load_trajectory(path)` | returns the typed facade; full verification is identical |
 | `engine_replay.build_trajectory(...)` | `build_trajectory(...)` | same guardrails: closed source, output must not exist |
 | `evidence_tree.EvidenceTree.load(path).validate()` | `load_tree(path)` / `validate_tree(path)` | same full re-derivation |
-| `evidence_tree.package_tree` / `export_tree` | `package_tree` / `export_tree` | `export_tree` refuses an existing destination |
+| `evidence_tree.package_tree` / `export_tree` | `package_tree` / `export_tree` | same writers plus the public reader's full validation; neither overwrites an existing destination |
 | `evidence_tree.root_placement` / `branch_placement` / `attach_tree` | same names | `TreePlacement` is the same object |
 | `audit_compare.AuditLog` | `trajectory_core.legacy_lvz.audit_compare.AuditLog` | advanced/legacy use only |
 | `root_integrity.check_state` / `check_root` | `trajectory_core.legacy_lvz.root_integrity` | game-state reference semantics, intentionally outside the public schema |
@@ -58,11 +58,36 @@ A *partial read* is always explicit: `inspect_tree()` reports
 
 Old seal records written on Windows store relative paths with `\` separators
 (for example `work\issue99-fc2-report.json`). `verify_seal(seal, source_root=...)`
-accepts those separators **only** when resolving the seal's own `tree` and
-`report` references, and still rejects absolute paths, drive/UNC prefixes and
-`..` traversal. The record itself is never rewritten. Evidence references inside
-a bundle are always resolved relative to that bundle and are checked for
-containment and SHA-256 before they are read.
+resolves those references against the explicit `source_root`; the same
+host-neutral grammar applies to every reference in the package, and absolute
+paths, drive/UNC prefixes and `..` traversal are always rejected. The record
+itself is never rewritten. Evidence references inside a bundle are always
+resolved relative to that bundle and are checked for containment and SHA-256
+before they are read.
+
+## Seal and tree-index validation
+
+Tree-index node paths and seal references are validated before the first node
+manifest is opened. A path that is absolute, drive/UNC-prefixed, traversing or a
+resolved symlink escape is rejected (the same grammar on POSIX and Windows), so
+`inspect_tree`, `validate_tree`, `verify_seal` and `export_tree` never read
+bytes outside the package root. A full tree load derives every parent-to-child
+chain once; a repeated `validate()`/`verify()` call reuses that result instead
+of re-reading the bundles.
+
+A `lvz.issue99-shovel-fork-seal.v1` record is validated as a structure before
+any comparison: non-object `nodes`/`reports` entries, duplicate node keys,
+duplicate report references (after normalizing `\`, `/` and `./` aliases, and
+after resolving symlinks), and entries missing `key`, `branch_id`, `trunk`,
+`parent_key`, `trajectory_id`, `manifest_sha256`, `path` or `sha256` raise
+`SealError`. An empty `reports` list is valid; a missing `reports` field is read
+as an empty list for compatibility. Mismatches between a well-formed record and
+the artifacts stay in the report's `problems` list.
+
+`package_tree` and `export_tree` run the same full validation as the readers
+before returning a tree or creating a ZIP: a child boundary the parent never
+reached is rejected by both writers, an existing destination is never touched,
+and an output created by a failing call is removed.
 
 ## Deliberately unsupported
 

@@ -13,10 +13,14 @@ partial read can never be mistaken for a verified one.
 
 from __future__ import annotations
 
+import shutil
+import zipfile
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from ._paths import require_within, resolve_under
 from .errors import EvidenceError, UnsupportedSchemaError
 from .identity import MANIFEST_FILE, TREE_SCHEMA, end_boundary
 from .jsonio import file_sha256, read_json
@@ -42,8 +46,6 @@ __all__ = [
 root_placement = _legacy_tree.root_placement
 branch_placement = _legacy_tree.branch_placement
 attach_tree = _legacy_tree.attach_tree
-package_tree = _legacy_tree.package_tree
-export_tree = _legacy_tree.export_tree
 
 
 @dataclass(frozen=True)
@@ -91,6 +93,9 @@ class EvidenceTree:
         self._legacy = legacy
         self._record = legacy.record
         self._summary: dict[str, Any] | None = None
+        self._directories = {
+            str(node["key"]): resolve_under(legacy.directory, str(node["path"])) for node in legacy.nodes
+        }
 
     @property
     def directory(self) -> Path:
@@ -108,10 +113,19 @@ class EvidenceTree:
     def nodes(self) -> list[dict[str, Any]]:
         return list(self._legacy.nodes)
 
+    def node_directory(self, node: dict[str, Any]) -> Path:
+        """The validated, resolved directory of an indexed node."""
+        key = str(node["key"])
+        directory = self._directories.get(key)
+        if directory is None:
+            raise EvidenceError(f"tree node is not part of the validated index: {key}")
+        return directory
+
     def validate(self) -> dict[str, Any]:
-        """Fully re-derive the tree; returns the legacy-shaped summary."""
-        self._summary = self._legacy.validate()
-        _verify_parent_boundaries(self)
+        """Fully re-derive the tree once; later calls reuse the verified result."""
+        if self._summary is None:
+            self._summary = self._legacy.validate()
+            _verify_parent_boundaries(self)
         return self._summary
 
     def verify(self) -> dict[str, Any]:
@@ -133,7 +147,7 @@ class EvidenceTree:
 
 
 def _node_summary(tree: EvidenceTree, node: dict[str, Any], *, verification: str) -> TreeNodeSummary:
-    manifest_path = tree.directory / node["path"] / MANIFEST_FILE
+    manifest_path = tree.node_directory(node) / MANIFEST_FILE
     manifest = read_json(manifest_path)
     section = manifest.get("tree") or {}
     parent = section.get("parent") if isinstance(section, dict) else None
@@ -188,16 +202,37 @@ def summary_of(tree: EvidenceTree, verified: dict[str, Any] | None = None) -> Tr
 
 
 def _load_index(path: str | Path) -> EvidenceTree:
-    """Read ``tree.json`` and check its schema; nodes are not read yet."""
+    """Read ``tree.json``, validate the whole index, and only then allow node reads."""
     legacy = _legacy_tree.EvidenceTree.load(path)
     record = legacy.record
     if not isinstance(record, dict) or record.get("schema") != TREE_SCHEMA:
         schema = record.get("schema") if isinstance(record, dict) else None
         raise UnsupportedSchemaError(f"unsupported tree schema {schema!r}; this package reads {TREE_SCHEMA!r}")
+    _validate_index(legacy.directory, record)
     identities = [str(node["trajectory_id"]) for node in legacy.nodes]
     if len(set(identities)) != len(identities):
         raise EvidenceError("the tree indexes the same trajectory identity more than once")
     return EvidenceTree(legacy)
+
+
+def _validate_index(directory: Path, record: Any) -> list[dict[str, Any]]:
+    """Enforce the public path contract, then the legacy index rules.
+
+    This runs before any node manifest is opened: an index path that is
+    absolute, drive/UNC prefixed, traversing or a resolved symlink escape is
+    rejected here, and the legacy validator still proves keys, parents and
+    directories exactly as before.
+    """
+    declared = record.get("nodes") if isinstance(record, dict) else None
+    if isinstance(declared, list):
+        for node in declared:
+            if isinstance(node, dict) and isinstance(node.get("path"), str):
+                resolve_under(directory, node["path"])
+    try:
+        nodes = _legacy_tree._index_entries(directory, record)
+    except TypeError as error:
+        raise EvidenceError(f"evidence tree node entry is malformed: {error}") from error
+    return list(nodes)
 
 
 def _boundary_key(boundary: Any) -> tuple[int, int, int] | None:
@@ -210,20 +245,54 @@ def _boundary_key(boundary: Any) -> tuple[int, int, int] | None:
 
 
 def _reached_boundaries(manifest: dict[str, Any]) -> set[tuple[int, int, int]]:
-    """Every boundary a recording can be departed from: its initial plus step ends."""
-    reached = {_boundary_key(manifest["initial"]["observation"]["version"])}
+    """Every boundary a recording can be departed from.
+
+    The set covers the initial boundary, every request end, and every
+    intermediate audit boundary a multi-tick request actually passed through
+    (action revisions and per-tick post-step versions). Legacy branch
+    coordinates inside a multi-tick request are therefore not rejected just
+    because the request only records its final version.
+    """
+    reached: set[tuple[int, int, int]] = set()
+    current = _boundary_key(manifest["initial"]["observation"]["version"])
+    if current is not None:
+        reached.add(current)
     for step in manifest.get("steps") or []:
-        if step["request"]["method"] == "capture_frame":
-            version = step.get("after_version")
-        else:
-            version = step.get("result", {}).get("observation", {}).get("version")
-        reached.add(_boundary_key(version) if isinstance(version, dict) else None)
-    return {item for item in reached if item is not None}
+        request = step.get("request") or {}
+        method = request.get("method")
+        expect = _boundary_key(request.get("expect")) if isinstance(request, dict) else None
+        if expect is not None:
+            reached.add(expect)
+            current = expect
+        if method == "capture_frame":
+            after = _boundary_key(step.get("after_version"))
+            if after is not None:
+                reached.add(after)
+                current = after
+            continue
+        if method not in {"commit", "advance"}:
+            continue
+        result = step.get("result")
+        if not isinstance(result, dict) or current is None:
+            continue
+        outcomes = result.get("action_results")
+        if isinstance(outcomes, list):
+            for ordinal in range(len(outcomes)):
+                reached.add((current[0], current[1], current[2] + ordinal + 1))
+        executed = result.get("executed_ticks")
+        if type(executed) is int:
+            for tick in range(1, executed + 1):
+                reached.add((current[0], current[1] + tick, 0))
+        end = _boundary_key(result.get("observation", {}).get("version"))
+        if end is not None:
+            reached.add(end)
+            current = end
+    return reached
 
 
 def _verify_parent_boundaries(tree: EvidenceTree) -> None:
     """A child may only depart from a boundary its parent actually reached."""
-    manifests = {str(node["key"]): read_json(tree.directory / str(node["path"]) / MANIFEST_FILE) for node in tree.nodes}
+    manifests = {str(node["key"]): read_json(tree.node_directory(node) / MANIFEST_FILE) for node in tree.nodes}
     for node in tree.nodes:
         parent_key = node["parent_key"]
         if parent_key is None:
@@ -254,3 +323,69 @@ def validate_tree(path: str | Path) -> dict[str, Any]:
 def inspect_tree(path: str | Path) -> TreeSummary:
     """Read the index and node manifests without re-deriving the chains."""
     return summary_of(_load_index(path))
+
+
+def package_tree(output_directory: str | Path, root: Any, *, branches: Iterable[Any] = ()) -> EvidenceTree:
+    """Copy placed bundles into a new tree and fully validate it before returning.
+
+    The legacy packager writes the directory and re-derives the legacy
+    contract. This wrapper then applies the same checks the public reader uses
+    (index path contract, duplicate identities and parent departure
+    boundaries); a tree the reader would reject is never returned. An existing
+    destination is never touched, and an output created by this call is
+    removed when the public validation fails.
+    """
+    output = Path(output_directory)
+    if output.exists():
+        raise EvidenceError(f"package destination already exists: {output}")
+    _legacy_tree.package_tree(output, root, branches=branches)
+    try:
+        tree = _load_index(output)
+        tree.validate()
+    except BaseException:
+        shutil.rmtree(output, ignore_errors=True)
+        raise
+    return tree
+
+
+def export_tree(path: str | Path, output: str | Path) -> Path:
+    """Export a fully validated tree as a deterministic ZIP.
+
+    Full public validation (including parent departure boundaries) completes
+    before any output is created; an existing destination is never overwritten
+    and a file this call started is removed when writing fails.
+    """
+    destination = Path(output)
+    if destination.exists():
+        raise EvidenceError(f"export destination already exists: {destination}")
+    tree = load_tree(path)
+    if destination.parent:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        _write_archive(tree.directory, destination)
+    except BaseException:
+        destination.unlink(missing_ok=True)
+        raise
+    return destination
+
+
+def _write_archive(tree_directory: Path, destination: Path) -> None:
+    """The deterministic ZIP layout the legacy exporter defined.
+
+    Every archive member is proven to resolve inside the tree before the ZIP is
+    opened, so a symlinked member cannot smuggle bytes from outside the tree.
+    """
+    root = tree_directory.resolve()
+    files = []
+    for candidate in tree_directory.rglob("*"):
+        if candidate.is_file():
+            require_within(root, candidate, label="tree archive member")
+            files.append(candidate)
+    with zipfile.ZipFile(destination, "x", compression=zipfile.ZIP_DEFLATED) as archive:
+        for candidate in sorted(files):
+            relative = candidate.relative_to(tree_directory).as_posix()
+            info = zipfile.ZipInfo(relative, date_time=(1980, 1, 1, 0, 0, 0))
+            info.compress_type = zipfile.ZIP_DEFLATED
+            info.create_system = 3
+            info.external_attr = 0o644 << 16
+            archive.writestr(info, candidate.read_bytes())

@@ -8,30 +8,35 @@ it with an explicit ``source_root`` -- the only place a legacy path convention
 is interpreted -- and re-derives every field.  It never rewrites the record or
 any artifact it binds.
 
-``export_tree`` is the only writer here: it validates first and refuses an
-existing destination, so a seal can never be silently replaced.
+Every declaration is validated before it is compared.  Duplicate node keys,
+duplicate report references (including normalized aliases), non-object entries
+and entries missing required fields are ``SealError``s instead of being
+silently overwritten or dropped.  An empty ``reports`` list stays valid: a seal
+may bind a tree without binding any report.
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ._paths import resolve_under
+from ._paths import normalize_reference, resolve_under
 from .errors import EvidenceError, SealError, UnsupportedSchemaError
 from .identity import MANIFEST_FILE
 from .jsonio import file_sha256, read_json
 from .trajectory import load_trajectory
-from .tree import _load_index
-from .tree import export_tree as _legacy_export_tree
+from .tree import EvidenceTree, _load_index, export_tree
 
 SEAL_REPORT_SCHEMA = "trajectory-core.seal-report.v1"
 SUPPORTED_SEAL_SCHEMAS = frozenset({"lvz.issue99-shovel-fork-seal.v1"})
 
 __all__ = ["SUPPORTED_SEAL_SCHEMAS", "SEAL_REPORT_SCHEMA", "read_seal", "verify_seal", "export_tree"]
 
-export_tree = _legacy_export_tree
+_SHA256 = re.compile(r"[0-9a-f]{64}")
+_NODE_FIELDS = ("key", "branch_id", "trunk", "parent_key", "trajectory_id", "manifest_sha256")
+_REPORT_FIELDS = ("path", "sha256")
 
 
 @dataclass
@@ -87,12 +92,81 @@ def _compare_node(declared: dict[str, Any], actual: dict[str, Any]) -> list[dict
     return problems
 
 
-def _attribute_node_failures(tree_directory: Path, nodes: Any) -> dict[str, str]:
-    """When full tree validation fails, load each node to name the broken ones."""
+def _validate_node_bindings(record: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Validate every declared node binding, rejecting duplicates and omissions."""
+    declared = record.get("nodes")
+    if not isinstance(declared, list):
+        raise SealError("seal record nodes must be a list")
+    bindings: dict[str, dict[str, Any]] = {}
+    for entry in declared:
+        if not isinstance(entry, dict):
+            raise SealError(f"seal node binding must be an object: {entry!r}")
+        missing = [name for name in _NODE_FIELDS if name not in entry]
+        if missing:
+            raise SealError(f"seal node binding is missing required fields: {', '.join(missing)}")
+        key = entry["key"]
+        if not isinstance(key, str) or not key:
+            raise SealError("seal node binding key must be a nonempty string")
+        if key in bindings:
+            raise SealError(f"seal record binds node {key!r} more than once")
+        if not isinstance(entry["branch_id"], str):
+            raise SealError(f"seal node binding {key!r} branch_id must be a string")
+        if type(entry["trunk"]) is not bool:
+            raise SealError(f"seal node binding {key!r} trunk must be boolean")
+        if entry["parent_key"] is not None and not isinstance(entry["parent_key"], str):
+            raise SealError(f"seal node binding {key!r} parent_key must be a string or null")
+        for name in ("trajectory_id", "manifest_sha256"):
+            value = entry[name]
+            if not isinstance(value, str) or _SHA256.fullmatch(value) is None:
+                raise SealError(f"seal node binding {key!r} {name} must be a lowercase SHA-256 value")
+        bindings[key] = entry
+    return bindings
+
+
+def _validate_report_bindings(root: Path, record: dict[str, Any]) -> list[tuple[dict[str, Any], Path]]:
+    """Validate and resolve every declared report binding once.
+
+    Returns ``(entry, resolved_path)`` pairs.  Duplicates are detected on the
+    normalized reference and on the resolved path, so ``a\\b.json``,
+    ``a/b.json`` and ``./a/b.json`` cannot all be bound separately, and neither
+    can two references that resolve to the same file through a symlink.
+    """
+    declared = record.get("reports")
+    if declared is None:
+        return []
+    if not isinstance(declared, list):
+        raise SealError("seal record reports must be a list")
+    resolved_entries: list[tuple[dict[str, Any], Path]] = []
+    seen_references: set[str] = set()
+    seen_paths: set[Path] = set()
+    for entry in declared:
+        if not isinstance(entry, dict):
+            raise SealError(f"seal report binding must be an object: {entry!r}")
+        missing = [name for name in _REPORT_FIELDS if name not in entry]
+        if missing:
+            raise SealError(f"seal report binding is missing required fields: {', '.join(missing)}")
+        reference = entry["path"]
+        if not isinstance(reference, str) or not reference.strip():
+            raise SealError("seal report path must be a nonempty string")
+        checksum = entry["sha256"]
+        if not isinstance(checksum, str) or _SHA256.fullmatch(checksum) is None:
+            raise SealError(f"seal report {reference!r} sha256 must be a lowercase SHA-256 value")
+        normalized = normalize_reference(reference, legacy_windows=True)
+        resolved = resolve_under(root, reference, legacy_windows=True)
+        if normalized in seen_references or resolved in seen_paths:
+            raise SealError(f"seal record binds report {reference!r} more than once")
+        seen_references.add(normalized)
+        seen_paths.add(resolved)
+        resolved_entries.append((entry, resolved))
+    return resolved_entries
+
+
+def _attribute_node_failures(tree: EvidenceTree, nodes: Any) -> dict[str, str]:
+    """When full tree validation fails, load each validated node to name the broken ones."""
     outcome: dict[str, str] = {}
     for node in nodes:
         try:
-            loaded = load_trajectory(tree_directory / str(node["path"]))
+            loaded = load_trajectory(tree.node_directory(node))
             outcome[str(node["key"])] = "full"
             if loaded.trajectory_id != node["trajectory_id"]:
                 outcome[str(node["key"])] = "identity_mismatch"
@@ -111,6 +185,11 @@ def verify_seal(seal_path: str | Path, *, source_root: str | Path, verify_nodes:
     node is loaded through the public trajectory reader and the whole chain is
     checked); a comparison of manifest digests alone is never presented as
     full verification.
+
+    Structural problems in the record itself -- duplicate node keys, duplicate
+    report references, non-object entries or missing required fields -- raise
+    ``SealError``.  Mismatches between a well-formed record and the artifacts
+    stay in ``problems`` so a caller can print all of them at once.
     """
     root = Path(source_root)
     if not root.is_dir():
@@ -129,8 +208,12 @@ def verify_seal(seal_path: str | Path, *, source_root: str | Path, verify_nodes:
     if record.get("tree_id") != tree_id:
         problems.append({"what": "tree_id", "declared": record.get("tree_id"), "actual": tree_id})
 
+    declared_nodes = _validate_node_bindings(record)
+    declared_reports = _validate_report_bindings(root, record)
+
     verified: dict[str, Any] | None = None
     node_verification = "digest_only"
+    attribution: dict[str, str] = {}
     if verify_nodes:
         try:
             verified = tree.validate()
@@ -138,19 +221,13 @@ def verify_seal(seal_path: str | Path, *, source_root: str | Path, verify_nodes:
         except EvidenceError as error:
             node_verification = "failed"
             problems.append({"what": "tree.validate", "detail": f"{type(error).__name__}: {error}"})
-            attribution = _attribute_node_failures(tree_directory, tree.nodes)
-        else:
-            attribution = {}
-    else:
-        attribution = {}
+            attribution = _attribute_node_failures(tree, tree.nodes)
 
-    declared_nodes = list(record.get("nodes") or [])
-    by_key = {str(item.get("key")): item for item in declared_nodes if isinstance(item, dict)}
     node_checks: list[NodeCheck] = []
     for node in tree.nodes:
         key = str(node["key"])
-        declared = by_key.pop(key, None)
-        manifest_path = tree_directory / str(node["path"]) / MANIFEST_FILE
+        declared = declared_nodes.pop(key, None)
+        manifest_path = tree.node_directory(node) / MANIFEST_FILE
         actual = {
             "key": key,
             "branch_id": node["branch_id"],
@@ -192,22 +269,18 @@ def verify_seal(seal_path: str | Path, *, source_root: str | Path, verify_nodes:
             )
         problems.extend(check.problems)
         node_checks.append(check)
-    for key in sorted(by_key):
+    for key in sorted(declared_nodes):
         problems.append({"what": "node", "key": key, "detail": "the seal binds a node the tree does not have"})
 
     reports = []
-    for item in record.get("reports") or []:
-        if not isinstance(item, dict) or not isinstance(item.get("path"), str):
-            problems.append({"what": "report", "detail": "report entry is malformed", "entry": item})
-            continue
-        resolved = resolve_under(root, item["path"], legacy_windows=True)
+    for entry, resolved in declared_reports:
         actual_sha256 = file_sha256(resolved) if resolved.is_file() else None
-        match = actual_sha256 is not None and actual_sha256 == item.get("sha256")
+        match = actual_sha256 is not None and actual_sha256 == entry["sha256"]
         reports.append(
             {
-                "path": item["path"],
+                "path": entry["path"],
                 "resolved": str(resolved),
-                "declared_sha256": item.get("sha256"),
+                "declared_sha256": entry["sha256"],
                 "actual_sha256": actual_sha256,
                 "match": match,
             }
@@ -216,8 +289,8 @@ def verify_seal(seal_path: str | Path, *, source_root: str | Path, verify_nodes:
             problems.append(
                 {
                     "what": "report.sha256",
-                    "path": item["path"],
-                    "declared": item.get("sha256"),
+                    "path": entry["path"],
+                    "declared": entry["sha256"],
                     "actual": actual_sha256,
                 }
             )

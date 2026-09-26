@@ -14,14 +14,19 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from .errors import PathContractError
 
 
-def _reject_absolute(reference: str, *, windows: bool) -> str:
-    cleaned = reference.replace("\\", "/") if windows else reference
-    if windows and (reference.startswith("\\\\") or PureWindowsPath(reference).is_absolute()):
+def _reject_absolute(reference: str) -> str:
+    """Return ``reference`` with host-neutral separators or raise.
+
+    Backslashes are read as separators on every host, so a drive/UNC reference
+    written on Windows cannot be mistaken for one relative filename when the
+    reader runs on POSIX. Absolute, drive and UNC prefixes are rejected
+    uniformly instead of relying on the host filesystem's separator rules.
+    """
+    cleaned = reference.replace("\\", "/")
+    if PurePosixPath(cleaned).is_absolute() or cleaned.startswith("//"):
         raise PathContractError(f"reference must be relative to the package root: {reference!r}")
-    if PurePosixPath(reference).is_absolute() or cleaned.startswith("//"):
-        raise PathContractError(f"reference must be relative to the package root: {reference!r}")
-    if windows and len(cleaned) >= 2 and cleaned[1] == ":":
-        raise PathContractError(f"reference must not carry a drive letter: {reference!r}")
+    if PureWindowsPath(reference).drive:
+        raise PathContractError(f"reference must not carry a drive or UNC prefix: {reference!r}")
     if not cleaned or cleaned in {".", "./"}:
         raise PathContractError("reference must not be empty")
     return cleaned
@@ -30,13 +35,14 @@ def _reject_absolute(reference: str, *, windows: bool) -> str:
 def normalize_reference(reference: str, *, legacy_windows: bool = False) -> str:
     """Return a POSIX-style relative reference or raise ``PathContractError``.
 
-    ``legacy_windows`` accepts the backslash separators that old Windows
-    tooling wrote into seal records; the value is normalized, never interpreted
-    by the host filesystem's separator rules.
+    The grammar is host-neutral. ``legacy_windows`` marks a caller that is
+    reading an old Windows-written record (for example a seal); backslash
+    separators are normalized on every host either way, and the parameter no
+    longer changes the accepted grammar.
     """
     if not isinstance(reference, str) or not reference.strip():
         raise PathContractError(f"reference must be a nonempty path string: {reference!r}")
-    cleaned = _reject_absolute(reference, windows=legacy_windows)
+    cleaned = _reject_absolute(reference)
     parts: list[str] = []
     for part in cleaned.split("/"):
         if part in {"", "."}:

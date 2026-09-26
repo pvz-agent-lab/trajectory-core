@@ -60,7 +60,12 @@ A packaged tree adds exactly one manifest section (`tree`); each recording keeps
 its own content identity. Validation re-derives the root identity and every
 chain from the root down, checks branch scope (a `branch_id` cannot fork inside
 one tree, only the root may omit a parent) and rejects a node that claims the
-real continuation baseline off the trunk.
+real continuation baseline off the trunk. A child may depart from any boundary
+its parent actually reached, including action revisions and per-tick versions
+inside a multi-tick request. The whole tree index is validated for containment
+and uniqueness before a node manifest is opened, and an escaped path
+(absolute, drive/UNC, `..` or resolved symlink) is a `PathContractError` on
+every host.
 
 ## Verify a seal
 
@@ -73,7 +78,12 @@ The seal's relative, possibly backslash-separated references are interpreted
 against the explicit `source_root`; nothing in the library hard-codes a private
 path. The verifier recomputes the tree identity, every node `manifest_sha256`
 and every report digest, and (by default) fully re-reads each node. Use
-`verify_nodes=False` for a `"structure_only"` report.
+`verify_nodes=False` for a `"structure_only"` report. Declarations are checked
+before anything is compared: duplicate node keys, duplicate report references
+(including normalized aliases such as `a\b.json`, `a/b.json` and `./a/b.json`),
+non-object entries and entries missing required fields raise `SealError`
+instead of being silently overwritten or dropped. An empty `reports` list is
+valid: the seal may bind the tree without binding a report.
 
 ## CLI
 
@@ -85,6 +95,12 @@ trajectory-core inspect-tree PATH           # index-only projection
 trajectory-core verify-seal SEAL --source-root DIR [--structure-only]
 trajectory-core export TREE OUTPUT.zip      # deterministic ZIP, refuses to overwrite
 ```
+
+`package_tree` and `export_tree` apply the same full public validation as the
+readers (including parent departure boundaries and the path contract) before a
+tree is returned or a ZIP is created. Existing destinations are never touched,
+and an output created by the failing call is removed when validation or writing
+fails.
 
 Exit codes: `0` valid, `1` invalid evidence, `2` usage error, `3` unsupported
 schema/capability.

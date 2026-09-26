@@ -225,14 +225,18 @@ class Trajectory:
         )
 
     def verify(self) -> dict[str, Any]:
-        """Re-read the bundle from disk and return a machine-readable report."""
-        loaded = load_trajectory(self.directory)
+        """Project the machine-readable report of the already-verified bundle.
+
+        Every public ``Trajectory`` comes from a full load that already
+        re-derived the identity, evidence digests, audit and session trace, so
+        this never starts a second expensive read of the same bytes.
+        """
         return {
             "schema": "trajectory-core.trajectory-report.v1",
             "path": str(self.directory),
             "status": "valid",
-            "trajectory_id": loaded.trajectory_id,
-            "summary": loaded.summary().to_dict(),
+            "trajectory_id": self.trajectory_id,
+            "summary": self.summary().to_dict(),
             "scope": "manifest identity, every evidence digest, closed audit stream and session trace",
         }
 

@@ -137,6 +137,24 @@ def test_sealing_refuses_to_overwrite_an_existing_output(tmp_path: Path) -> None
     assert (output / "keep.txt").read_text(encoding="utf-8") == "keep\n"
 
 
+def test_validate_trajectory_reads_the_bundle_once(lab: dict, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[Path] = []
+    real_load = tc.trajectory._legacy_trajectory.Trajectory.load
+
+    def spy(path):
+        calls.append(Path(path))
+        return real_load(path)
+
+    monkeypatch.setattr(tc.trajectory._legacy_trajectory.Trajectory, "load", spy)
+    assert tc.validate_trajectory(lab["plain"])["status"] == "valid"
+    assert len(calls) == 1
+    calls.clear()
+    trajectory = tc.load_trajectory(lab["plain"])
+    assert trajectory.verify()["status"] == "valid"
+    trajectory.verify()
+    assert len(calls) == 1
+
+
 def test_reading_is_read_only(lab: dict) -> None:
     def inventory(root: Path) -> dict:
         return {str(path.relative_to(root)): tc.file_hash(path) for path in sorted(root.rglob("*")) if path.is_file()}

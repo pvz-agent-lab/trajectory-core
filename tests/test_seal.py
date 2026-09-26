@@ -145,3 +145,88 @@ def test_non_object_record_is_rejected(tmp_path: Path) -> None:
     path.write_text(json.dumps([1, 2, 3]) + "\n", encoding="utf-8")
     with pytest.raises(tc.SealError):
         tc.read_seal(path)
+
+
+def test_duplicate_node_binding_is_rejected(staged: dict) -> None:
+    record = read_json(staged["seal"])
+    record["nodes"] = [dict(record["nodes"][0], manifest_sha256="0" * 64), *record["nodes"]]
+    write_json(staged["seal"], record)
+    with pytest.raises(tc.SealError, match="more than once"):
+        tc.verify_seal(staged["seal"], source_root=staged["stage"])
+
+
+def test_non_object_node_binding_is_rejected(staged: dict) -> None:
+    record = read_json(staged["seal"])
+    record["nodes"].append(17)
+    write_json(staged["seal"], record)
+    with pytest.raises(tc.SealError, match="must be an object"):
+        tc.verify_seal(staged["seal"], source_root=staged["stage"])
+
+
+def test_node_binding_missing_a_field_is_rejected(staged: dict) -> None:
+    record = read_json(staged["seal"])
+    del record["nodes"][0]["manifest_sha256"]
+    write_json(staged["seal"], record)
+    with pytest.raises(tc.SealError, match="missing required fields"):
+        tc.verify_seal(staged["seal"], source_root=staged["stage"])
+
+
+def test_duplicate_report_alias_is_rejected(staged: dict) -> None:
+    record = read_json(staged["seal"])
+    first = record["reports"][0]
+    record["reports"].append({"path": "./" + first["path"].replace("/", "\\"), "sha256": first["sha256"]})
+    write_json(staged["seal"], record)
+    with pytest.raises(tc.SealError, match="more than once"):
+        tc.verify_seal(staged["seal"], source_root=staged["stage"])
+
+
+def test_malformed_report_binding_is_rejected(staged: dict) -> None:
+    record = read_json(staged["seal"])
+    record["reports"].append({"path": "work/extra.json"})
+    write_json(staged["seal"], record)
+    with pytest.raises(tc.SealError, match="missing required fields"):
+        tc.verify_seal(staged["seal"], source_root=staged["stage"])
+
+
+def test_empty_report_list_stays_valid(staged: dict) -> None:
+    record = read_json(staged["seal"])
+    record["reports"] = []
+    write_json(staged["seal"], record)
+    report = tc.verify_seal(staged["seal"], source_root=staged["stage"])
+    assert report["matches"] is True
+    assert report["reports"] == []
+    assert report["verification"] == "full"
+
+
+def test_escaped_index_path_is_rejected_before_any_node_read(staged: dict, monkeypatch: pytest.MonkeyPatch) -> None:
+    tree = staged["stage"] / "tree"
+    outside = staged["stage"] / "outside-left"
+    shutil.copytree(tree / "nodes" / "left", outside)
+    shutil.rmtree(tree / "nodes" / "left")
+    record = read_json(tree / "tree.json")
+    next(item for item in record["nodes"] if item["key"] == "left")["path"] = "../outside-left"
+    write_json(tree / "tree.json", record)
+    right = tree / "nodes" / "right" / "trajectory.json"
+    right.write_bytes(right.read_bytes() + b"\n")
+
+    reads: list[Path] = []
+    real_hash = tc.seal.file_sha256
+
+    def hash_spy(path):
+        reads.append(Path(path))
+        return real_hash(path)
+
+    loads: list[Path] = []
+    real_load = tc.seal.load_trajectory
+
+    def load_spy(path):
+        loads.append(Path(path))
+        return real_load(path)
+
+    monkeypatch.setattr(tc.seal, "file_sha256", hash_spy)
+    monkeypatch.setattr(tc.seal, "load_trajectory", load_spy)
+    for verify_nodes in (False, True):
+        with pytest.raises(tc.PathContractError):
+            tc.verify_seal(staged["seal"], source_root=staged["stage"], verify_nodes=verify_nodes)
+    assert reads == []
+    assert loads == []
