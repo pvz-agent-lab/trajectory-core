@@ -145,7 +145,7 @@ def _native_hash():
                     command,
                     capture_output=True,
                     timeout=45,
-                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+                    creationflags=(getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0),
                 )
                 if result.returncode:
                     return None
