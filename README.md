@@ -63,9 +63,11 @@ one tree, only the root may omit a parent) and rejects a node that claims the
 real continuation baseline off the trunk. A child may depart from any boundary
 its parent actually reached, including action revisions and per-tick versions
 inside a multi-tick request. The whole tree index is validated for containment
-and uniqueness before a node manifest is opened, and an escaped path
-(absolute, drive/UNC, `..` or resolved symlink) is a `PathContractError` on
-every host.
+and uniqueness before a node manifest is opened; the node manifest files (and
+the index file itself), a standalone trajectory manifest and the evidence a
+bundle declares are bounded the same way, so an escaped file — not just an
+escaped directory — is a `PathContractError` on every host before any byte is
+read.
 
 ## Verify a seal
 

@@ -230,3 +230,18 @@ def test_escaped_index_path_is_rejected_before_any_node_read(staged: dict, monke
             tc.verify_seal(staged["seal"], source_root=staged["stage"], verify_nodes=verify_nodes)
     assert reads == []
     assert loads == []
+
+
+def test_symlinked_node_manifest_escape_is_rejected(staged: dict) -> None:
+    tree = staged["stage"] / "tree"
+    manifest = tree / "nodes" / "left" / "trajectory.json"
+    outside = staged["stage"] / "outside-trajectory.json"
+    shutil.copyfile(manifest, outside)
+    manifest.unlink()
+    try:
+        manifest.symlink_to(outside)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks are not available for this account")
+    for verify_nodes in (False, True):
+        with pytest.raises(tc.PathContractError, match="escapes its package root"):
+            tc.verify_seal(staged["seal"], source_root=staged["stage"], verify_nodes=verify_nodes)

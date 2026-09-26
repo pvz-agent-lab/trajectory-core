@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 import pytest
@@ -107,6 +108,67 @@ def test_missing_manifest_is_incomplete_evidence(tmp_path: Path) -> None:
     (bundle / "trajectory.json").unlink()
     with pytest.raises(tc.IncompleteEvidenceError):
         tc.load_trajectory(bundle)
+
+
+def test_symlinked_manifest_escape_is_rejected(tmp_path: Path) -> None:
+    bundle = build_bundle(tmp_path, "manifest-link")
+    manifest = bundle / "trajectory.json"
+    outside = tmp_path / "outside-manifest.json"
+    shutil.copyfile(manifest, outside)
+    manifest.unlink()
+    try:
+        manifest.symlink_to(outside)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks are not available for this account")
+    with pytest.raises(tc.PathContractError, match="escapes its package root"):
+        tc.load_trajectory(bundle)
+    with pytest.raises(tc.PathContractError, match="escapes its package root"):
+        tc.validate_trajectory(bundle)
+
+
+def test_symlinked_evidence_escape_is_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    bundle = build_bundle(tmp_path, "evidence-link")
+    evidence = bundle / "session.jsonl"
+    outside = tmp_path / "outside-session.jsonl"
+    shutil.copyfile(evidence, outside)
+    evidence.unlink()
+    try:
+        evidence.symlink_to(outside)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks are not available for this account")
+    hashed: list[Path] = []
+    real_hash = tc.trajectory._legacy_trajectory.file_hash
+
+    def spy(path):
+        hashed.append(Path(path))
+        return real_hash(path)
+
+    monkeypatch.setattr(tc.trajectory._legacy_trajectory, "file_hash", spy)
+    with pytest.raises(tc.PathContractError, match="escapes its package root"):
+        tc.load_trajectory(bundle)
+    assert hashed == []
+
+
+def test_symlinked_audit_directory_escape_is_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    bundle = build_bundle(tmp_path, "audit-link")
+    outside = tmp_path / "outside-audit"
+    shutil.copytree(bundle / "audit", outside)
+    shutil.rmtree(bundle / "audit")
+    try:
+        (bundle / "audit").symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks are not available for this account")
+    reads: list[Path] = []
+    real_read_json = tc.trajectory._legacy_trajectory.read_json
+
+    def spy(path):
+        reads.append(Path(path))
+        return real_read_json(path)
+
+    monkeypatch.setattr(tc.trajectory._legacy_trajectory, "read_json", spy)
+    with pytest.raises(tc.PathContractError, match="escapes its package root"):
+        tc.load_trajectory(bundle)
+    assert reads == []
 
 
 def test_sealing_refuses_a_recording_without_close_evidence(tmp_path: Path) -> None:

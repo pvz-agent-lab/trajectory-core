@@ -61,19 +61,20 @@ Old seal records written on Windows store relative paths with `\` separators
 resolves those references against the explicit `source_root`; the same
 host-neutral grammar applies to every reference in the package, and absolute
 paths, drive/UNC prefixes and `..` traversal are always rejected. The record
-itself is never rewritten. Evidence references inside a bundle are always
-resolved relative to that bundle and are checked for containment and SHA-256
-before they are read.
+itself is never rewritten. Evidence references inside a bundle, the bundle's
+manifest file and its audit directory are always resolved relative to that
+bundle and are checked for containment before they are read.
 
 ## Seal and tree-index validation
 
-Tree-index node paths and seal references are validated before the first node
-manifest is opened. A path that is absolute, drive/UNC-prefixed, traversing or a
-resolved symlink escape is rejected (the same grammar on POSIX and Windows), so
-`inspect_tree`, `validate_tree`, `verify_seal` and `export_tree` never read
-bytes outside the package root. A full tree load derives every parent-to-child
-chain once; a repeated `validate()`/`verify()` call reuses that result instead
-of re-reading the bundles.
+Tree-index node paths, node manifest files, the tree index file and seal
+references are validated before the first node manifest is opened. A path that
+is absolute, drive/UNC-prefixed, traversing or a resolved symlink escape is
+rejected (the same grammar on POSIX and Windows), so `inspect_tree`,
+`validate_tree`, `verify_seal` and `export_tree` never read bytes outside the
+package root. A full tree load derives every parent-to-child chain once; a
+repeated `validate()`/`verify()` call reuses that result instead of re-reading
+the bundles, and a failed full validation is not cached as a success.
 
 A `lvz.issue99-shovel-fork-seal.v1` record is validated as a structure before
 any comparison: non-object `nodes`/`reports` entries, duplicate node keys,
@@ -87,7 +88,8 @@ the artifacts stay in the report's `problems` list.
 `package_tree` and `export_tree` run the same full validation as the readers
 before returning a tree or creating a ZIP: a child boundary the parent never
 reached is rejected by both writers, an existing destination is never touched,
-and an output created by a failing call is removed.
+and only a file this call exclusively created is removed when writing fails
+(a competing writer's file is left untouched).
 
 ## Deliberately unsupported
 

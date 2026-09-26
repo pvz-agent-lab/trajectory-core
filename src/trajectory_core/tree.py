@@ -22,7 +22,7 @@ from typing import Any
 
 from ._paths import require_within, resolve_under
 from .errors import EvidenceError, UnsupportedSchemaError
-from .identity import MANIFEST_FILE, TREE_SCHEMA, end_boundary
+from .identity import MANIFEST_FILE, TREE_FILE, TREE_SCHEMA, end_boundary
 from .jsonio import file_sha256, read_json
 from .legacy_lvz import evidence_tree as _legacy_tree
 from .legacy_lvz.evidence_tree import TreePlacement
@@ -96,6 +96,13 @@ class EvidenceTree:
         self._directories = {
             str(node["key"]): resolve_under(legacy.directory, str(node["path"])) for node in legacy.nodes
         }
+        # The directory contract alone does not make the files inside it safe:
+        # a node manifest may itself be a symlink out of the tree.  Resolve and
+        # bound every manifest here, before any mode opens one.
+        self._manifests = {
+            str(node["key"]): resolve_under(legacy.directory, f"{node['path']}/{MANIFEST_FILE}")
+            for node in legacy.nodes
+        }
 
     @property
     def directory(self) -> Path:
@@ -121,11 +128,25 @@ class EvidenceTree:
             raise EvidenceError(f"tree node is not part of the validated index: {key}")
         return directory
 
+    def node_manifest(self, node: dict[str, Any]) -> Path:
+        """The validated, resolved manifest file of an indexed node."""
+        key = str(node["key"])
+        manifest = self._manifests.get(key)
+        if manifest is None:
+            raise EvidenceError(f"tree node is not part of the validated index: {key}")
+        return manifest
+
     def validate(self) -> dict[str, Any]:
-        """Fully re-derive the tree once; later calls reuse the verified result."""
+        """Fully re-derive the tree once; later calls reuse the verified result.
+
+        The cached summary is assigned only after every check, including the
+        parent-boundary pass, has succeeded, so a failed validation cannot be
+        retried into a cached success.
+        """
         if self._summary is None:
-            self._summary = self._legacy.validate()
+            summary = self._legacy.validate()
             _verify_parent_boundaries(self)
+            self._summary = summary
         return self._summary
 
     def verify(self) -> dict[str, Any]:
@@ -147,7 +168,7 @@ class EvidenceTree:
 
 
 def _node_summary(tree: EvidenceTree, node: dict[str, Any], *, verification: str) -> TreeNodeSummary:
-    manifest_path = tree.node_directory(node) / MANIFEST_FILE
+    manifest_path = tree.node_manifest(node)
     manifest = read_json(manifest_path)
     section = manifest.get("tree") or {}
     parent = section.get("parent") if isinstance(section, dict) else None
@@ -202,7 +223,14 @@ def summary_of(tree: EvidenceTree, verified: dict[str, Any] | None = None) -> Tr
 
 
 def _load_index(path: str | Path) -> EvidenceTree:
-    """Read ``tree.json``, validate the whole index, and only then allow node reads."""
+    """Read ``tree.json``, validate the whole index, and only then allow node reads.
+
+    The index file itself is bounded before the legacy loader opens it, so a
+    symlinked index cannot smuggle outside bytes into any mode either.
+    """
+    candidate = Path(path)
+    directory = candidate.parent if candidate.is_file() else candidate
+    resolve_under(directory, TREE_FILE)
     legacy = _legacy_tree.EvidenceTree.load(path)
     record = legacy.record
     if not isinstance(record, dict) or record.get("schema") != TREE_SCHEMA:
@@ -227,7 +255,8 @@ def _validate_index(directory: Path, record: Any) -> list[dict[str, Any]]:
     if isinstance(declared, list):
         for node in declared:
             if isinstance(node, dict) and isinstance(node.get("path"), str):
-                resolve_under(directory, node["path"])
+                node_directory = resolve_under(directory, node["path"])
+                resolve_under(node_directory, MANIFEST_FILE)
     try:
         nodes = _legacy_tree._index_entries(directory, record)
     except TypeError as error:
@@ -292,7 +321,7 @@ def _reached_boundaries(manifest: dict[str, Any]) -> set[tuple[int, int, int]]:
 
 def _verify_parent_boundaries(tree: EvidenceTree) -> None:
     """A child may only depart from a boundary its parent actually reached."""
-    manifests = {str(node["key"]): read_json(tree.node_directory(node) / MANIFEST_FILE) for node in tree.nodes}
+    manifests = {str(node["key"]): read_json(tree.node_manifest(node)) for node in tree.nodes}
     for node in tree.nodes:
         parent_key = node["parent_key"]
         if parent_key is None:
@@ -353,7 +382,7 @@ def export_tree(path: str | Path, output: str | Path) -> Path:
 
     Full public validation (including parent departure boundaries) completes
     before any output is created; an existing destination is never overwritten
-    and a file this call started is removed when writing fails.
+    and only a file this call created is removed when writing fails.
     """
     destination = Path(output)
     if destination.exists():
@@ -361,11 +390,7 @@ def export_tree(path: str | Path, output: str | Path) -> Path:
     tree = load_tree(path)
     if destination.parent:
         destination.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        _write_archive(tree.directory, destination)
-    except BaseException:
-        destination.unlink(missing_ok=True)
-        raise
+    _write_archive(tree.directory, destination)
     return destination
 
 
@@ -374,6 +399,11 @@ def _write_archive(tree_directory: Path, destination: Path) -> None:
 
     Every archive member is proven to resolve inside the tree before the ZIP is
     opened, so a symlinked member cannot smuggle bytes from outside the tree.
+
+    The output is acquired with an exclusive create before it is opened as a
+    ZIP.  Cleanup is scoped to that ownership: if a competing writer creates
+    the destination first, its file is reported as already existing and never
+    deleted, while a file this call did create is removed when writing fails.
     """
     root = tree_directory.resolve()
     files = []
@@ -381,11 +411,19 @@ def _write_archive(tree_directory: Path, destination: Path) -> None:
         if candidate.is_file():
             require_within(root, candidate, label="tree archive member")
             files.append(candidate)
-    with zipfile.ZipFile(destination, "x", compression=zipfile.ZIP_DEFLATED) as archive:
-        for candidate in sorted(files):
-            relative = candidate.relative_to(tree_directory).as_posix()
-            info = zipfile.ZipInfo(relative, date_time=(1980, 1, 1, 0, 0, 0))
-            info.compress_type = zipfile.ZIP_DEFLATED
-            info.create_system = 3
-            info.external_attr = 0o644 << 16
-            archive.writestr(info, candidate.read_bytes())
+    try:
+        stream = destination.open("xb")
+    except FileExistsError:
+        raise EvidenceError(f"export destination already exists: {destination}") from None
+    try:
+        with stream, zipfile.ZipFile(stream, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for candidate in sorted(files):
+                relative = candidate.relative_to(tree_directory).as_posix()
+                info = zipfile.ZipInfo(relative, date_time=(1980, 1, 1, 0, 0, 0))
+                info.compress_type = zipfile.ZIP_DEFLATED
+                info.create_system = 3
+                info.external_attr = 0o644 << 16
+                archive.writestr(info, candidate.read_bytes())
+    except BaseException:
+        destination.unlink(missing_ok=True)
+        raise

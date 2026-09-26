@@ -24,7 +24,6 @@ from typing import Any
 
 from ._paths import normalize_reference, resolve_under
 from .errors import EvidenceError, SealError, UnsupportedSchemaError
-from .identity import MANIFEST_FILE
 from .jsonio import file_sha256, read_json
 from .trajectory import load_trajectory
 from .tree import EvidenceTree, _load_index, export_tree
@@ -166,7 +165,7 @@ def _attribute_node_failures(tree: EvidenceTree, nodes: Any) -> dict[str, str]:
     outcome: dict[str, str] = {}
     for node in nodes:
         try:
-            loaded = load_trajectory(tree.node_directory(node))
+            loaded = load_trajectory(tree.node_manifest(node))
             outcome[str(node["key"])] = "full"
             if loaded.trajectory_id != node["trajectory_id"]:
                 outcome[str(node["key"])] = "identity_mismatch"
@@ -227,7 +226,7 @@ def verify_seal(seal_path: str | Path, *, source_root: str | Path, verify_nodes:
     for node in tree.nodes:
         key = str(node["key"])
         declared = declared_nodes.pop(key, None)
-        manifest_path = tree.node_directory(node) / MANIFEST_FILE
+        manifest_path = tree.node_manifest(node)
         actual = {
             "key": key,
             "branch_id": node["branch_id"],

@@ -320,6 +320,54 @@ def test_symlinked_node_path_escape_is_rejected(lab: dict, tmp_path: Path) -> No
         tc.inspect_tree(tree)
 
 
+def test_symlinked_node_manifest_escape_is_rejected(lab: dict, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    tree = copy_tree(lab, tmp_path)
+    manifest = tree / "nodes" / "left" / "trajectory.json"
+    outside = tmp_path / "outside-trajectory.json"
+    shutil.copyfile(manifest, outside)
+    manifest.unlink()
+    try:
+        manifest.symlink_to(outside)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks are not available for this account")
+
+    reads: list[Path] = []
+    real_read_json = tc.tree.read_json
+
+    def spy(path):
+        reads.append(Path(path))
+        return real_read_json(path)
+
+    monkeypatch.setattr(tc.tree, "read_json", spy)
+    with pytest.raises(tc.PathContractError, match="escapes its package root"):
+        tc.inspect_tree(tree)
+    assert reads == []
+    with pytest.raises(tc.PathContractError, match="escapes its package root"):
+        tc.validate_tree(tree)
+    assert reads == []
+    destination = tmp_path / "escaped.zip"
+    with pytest.raises(tc.PathContractError, match="escapes its package root"):
+        tc.export_tree(tree, destination)
+    assert reads == []
+    assert not destination.exists()
+
+
+def test_symlinked_tree_index_escape_is_rejected(lab: dict, tmp_path: Path) -> None:
+    tree = copy_tree(lab, tmp_path)
+    index = tree / "tree.json"
+    outside = tmp_path / "outside-tree.json"
+    shutil.copyfile(index, outside)
+    index.unlink()
+    try:
+        index.symlink_to(outside)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks are not available for this account")
+    with pytest.raises(tc.PathContractError, match="escapes its package root"):
+        tc.inspect_tree(tree)
+    with pytest.raises(tc.PathContractError, match="escapes its package root"):
+        tc.validate_tree(tree)
+
+
 def _interior_bundles(tmp_path: Path, interior: dict) -> tuple[Path, Path]:
     source = tmp_path / "interior-source"
     trace = record_session(
@@ -396,14 +444,29 @@ def test_export_refuses_a_boundary_the_reader_rejects(lab: dict, tmp_path: Path)
 def test_export_removes_a_partial_output_it_created(lab: dict, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     destination = tmp_path / "partial.zip"
 
-    def failing(tree_directory, output):
-        Path(output).write_bytes(b"partial")
+    def failing(self, info, data):
         raise OSError("disk full")
 
-    monkeypatch.setattr(tc.tree, "_write_archive", failing)
+    monkeypatch.setattr(zipfile.ZipFile, "writestr", failing)
     with pytest.raises(OSError, match="disk full"):
         tc.export_tree(lab["tree"], destination)
     assert not destination.exists()
+
+
+def test_export_never_deletes_a_competing_writers_file(
+    lab: dict, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    destination = tmp_path / "contended.zip"
+    real_write = tc.tree._write_archive
+
+    def competing(tree_directory, output):
+        Path(output).write_bytes(b"competing-writer-bytes")
+        return real_write(tree_directory, output)
+
+    monkeypatch.setattr(tc.tree, "_write_archive", competing)
+    with pytest.raises(tc.EvidenceError, match="already exists"):
+        tc.export_tree(lab["tree"], destination)
+    assert destination.read_bytes() == b"competing-writer-bytes"
 
 
 def test_export_refuses_a_symlinked_member_escaping_the_tree(lab: dict, tmp_path: Path) -> None:
@@ -445,3 +508,40 @@ def test_validate_tree_derives_each_node_once(lab: dict, monkeypatch: pytest.Mon
     assert tree.verify()["status"] == "valid"
     tree.verify()
     assert len(calls) == 1
+
+
+def test_failed_validation_is_not_cached(lab: dict, tmp_path: Path) -> None:
+    tree_path = copy_tree(lab, tmp_path)
+
+    def move_boundary(manifest):
+        section = manifest["tree"]
+        section["parent"]["boundary"] = {"epoch": 99, "tick": 999, "revision": 0}
+        section["chain"]["sha256"] = tc.chain_sha256(
+            trajectory_id=manifest["trajectory_id"],
+            branch=section["branch_id"],
+            trunk=section["trunk"],
+            parent=section["parent"],
+            parent_sha256=section["parent"]["chain_sha256"],
+            tree_id=section["root"]["sha256"],
+        )
+
+    rewrite_node(tree_path, "left", move_boundary)
+    tree = tc.tree._load_index(tree_path)
+    with pytest.raises(tc.EvidenceError, match="never reached"):
+        tree.validate()
+    assert tree._summary is None
+
+    def restore_boundary(manifest):
+        section = manifest["tree"]
+        section["parent"]["boundary"] = dict(lab["end"])
+        section["chain"]["sha256"] = tc.chain_sha256(
+            trajectory_id=manifest["trajectory_id"],
+            branch=section["branch_id"],
+            trunk=section["trunk"],
+            parent=section["parent"],
+            parent_sha256=section["parent"]["chain_sha256"],
+            tree_id=section["root"]["sha256"],
+        )
+
+    rewrite_node(tree_path, "left", restore_boundary)
+    assert tree.validate()["tree_id"] == tc.load_tree(lab["tree"]).tree_id

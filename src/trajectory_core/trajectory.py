@@ -14,6 +14,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, cast
 
+from ._paths import require_within, resolve_under
 from .errors import EvidenceError, IncompleteEvidenceError, UnsupportedSchemaError
 from .identity import MANIFEST_FILE, TRAJECTORY_SCHEMA, end_boundary
 from .jsonio import read_json
@@ -96,8 +97,14 @@ def _manifest_path(path: str | Path) -> Path:
 
 
 def read_manifest(path: str | Path) -> dict[str, Any]:
-    """Read a manifest and reject an unknown schema before any deeper work."""
+    """Read a manifest, prove it stays inside its bundle, and reject unknown schemas.
+
+    A manifest is itself a file reference: a symlink that leaves the bundle
+    directory is a containment failure, checked before the manifest bytes are
+    opened and before any evidence it names is read.
+    """
     manifest_path = _manifest_path(path)
+    require_within(manifest_path.parent, manifest_path, label="trajectory manifest")
     if not manifest_path.is_file():
         raise IncompleteEvidenceError(f"trajectory manifest is missing: {manifest_path}")
     manifest = read_json(manifest_path)
@@ -241,9 +248,27 @@ class Trajectory:
         }
 
 
+def _bounded_bundle_references(path: str | Path, manifest: dict[str, Any]) -> None:
+    """Prove every referenced bundle path stays inside the bundle before any read.
+
+    The legacy reader hashes declared evidence through resolved containment
+    checks, but it reads the audit manifest and codec receipt first.  Bounding
+    the whole reference set (including the implicit ``audit`` directory) here
+    keeps that first read inside the bundle as well.
+    """
+    root = _manifest_path(path).parent
+    files = manifest.get("files")
+    if isinstance(files, dict):
+        for name in files:
+            if isinstance(name, str):
+                resolve_under(root, name)
+    resolve_under(root, "audit")
+
+
 def load_trajectory(path: str | Path) -> Trajectory:
     """Fully verify and load one sealed trajectory directory or manifest file."""
-    read_manifest(path)
+    manifest = read_manifest(path)
+    _bounded_bundle_references(path, manifest)
     try:
         legacy = _legacy_trajectory.Trajectory.load(path)
     except UnsupportedSchemaError:

@@ -12,10 +12,13 @@
   explicitly partial index-only mode. A child may depart from any boundary its
   parent actually reached, including intermediate action/tick boundaries inside
   a multi-tick request.
-* Every tree-index node path is validated for containment (absolute, drive/UNC,
-  `..` and resolved symlink escapes) before any node manifest is opened;
+* Every tree-index node path, every node manifest file and the index file are
+  validated for containment (absolute, drive/UNC, `..` and resolved symlink
+  escapes) before any of them is opened; a standalone trajectory manifest and
+  the evidence references a bundle declares are bounded the same way.
   `inspect_tree`, full validation, seal attribution and export all use the
-  validated directories.
+  validated resolved paths. A failed full validation is never cached, so a
+  retry re-runs every check.
 * Public `verify_seal` re-derives a legacy `lvz.issue99-shovel-fork-seal.v1`
   record against an explicit `source_root`, including its reports. Duplicate or
   malformed node/report declarations raise `SealError` instead of being
@@ -26,8 +29,9 @@
   drive/UNC/absolute references are always rejected.
 * `package_tree` and `export_tree` apply the same full public validation as the
   readers (including parent departure boundaries) before returning or creating
-  an artifact; existing destinations are never touched and a partial output is
-  removed on failure.
+  an artifact; existing destinations are never touched, and cleanup is scoped
+  to an output this call exclusively created, so a competing writer's file is
+  never deleted.
 * Repeated `validate_tree`/`load_tree(...).verify()` and
   `validate_trajectory`/`load_trajectory(...).verify()` calls reuse the already
   derived result instead of re-reading the private evidence.
