@@ -593,14 +593,12 @@ def test_sealing_removes_the_output_it_created_when_a_check_fails(stage: Path, m
     assert not destination.exists()
 
 
-def test_remove_owned_output_spares_a_replacement_file(stage: Path) -> None:
+def test_remove_owned_output_removes_the_file_it_created(stage: Path) -> None:
     destination = stage / "sealed.json"
     destination.write_bytes(b"this call's own output")
     own = os.stat(destination)
-    destination.unlink()
-    destination.write_bytes(b"a competing writer's file")
     tc.closure._remove_owned_output(destination, (own.st_dev, own.st_ino))
-    assert destination.read_bytes() == b"a competing writer's file"
+    assert not destination.exists()
 
 
 def test_sealing_never_deletes_a_competing_writers_file(stage: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -220,11 +220,12 @@ The sealing package must be an immutable input while it is sealed:
   a record outside the declared package is ever opened;
 * the destination is refused when it exists and is created exclusively, so a
   competing writer is never overwritten;
-* cleanup is scoped to this invocation's exclusive acquisition: only the file
-  this call itself created (proved by the captured file identity, never by
-  byte equality with a competing writer's file) is removed on failure.  A
-  competing writer that created the same deterministic payload first is left
-  untouched;
+* cleanup is scoped to this invocation's exclusive acquisition: only after
+  this call acquired the destination with an exclusive create is a failed
+  output considered for removal, and it is re-checked against the file
+  identity captured at acquisition — never against byte equality with a
+  competing writer's file.  A competing writer that created the same
+  deterministic payload first is left untouched;
 * the complete inventory is hashed before validation and re-checked after the
   write; a change before or during sealing aborts the seal.
 
