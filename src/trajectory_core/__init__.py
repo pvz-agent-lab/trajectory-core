@@ -15,9 +15,24 @@ are defined exactly once, in the adapted legacy closure under
 
 from __future__ import annotations
 
+from .closure import (
+    CLOSURE_REPORT_SCHEMA,
+    FORMAL_CLOSURE_SCHEMA,
+    PRODUCER_RECEIPT_SCHEMA,
+    RERUN_REPORT_SCHEMA,
+    FormalClosure,
+    load_formal_closure,
+    read_producer_receipt,
+    read_rerun_report,
+    seal_formal_closure,
+    validate_closure_record,
+    validate_formal_closure,
+)
 from .errors import (
+    ClosureError,
     EvidenceError,
     IncompleteEvidenceError,
+    OutcomeContractError,
     PathContractError,
     SealError,
     TrajectoryCoreError,
@@ -26,6 +41,15 @@ from .errors import (
 )
 from .identity import AUDIT_SCHEMA, TRAJECTORY_SCHEMA, TREE_SCHEMA, chain_sha256, content_identity, end_boundary
 from .jsonio import canonical, decode, file_hash, read_json
+from .outcome import (
+    OUTCOME_SCHEMA,
+    Outcome,
+    outcome_document,
+    outcome_from_legacy,
+    outcome_id,
+    read_outcome,
+    validate_outcome,
+)
 from .seal import SEAL_REPORT_SCHEMA, SUPPORTED_SEAL_SCHEMAS, read_seal, verify_seal
 from .trajectory import (
     StepSummary,
@@ -52,7 +76,7 @@ from .tree import (
     validate_tree,
 )
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "__version__",
@@ -63,11 +87,18 @@ __all__ = [
     "IncompleteEvidenceError",
     "PathContractError",
     "SealError",
+    "OutcomeContractError",
+    "ClosureError",
     "UnsupportedCapabilityError",
     # schemas and identity
     "TRAJECTORY_SCHEMA",
     "TREE_SCHEMA",
     "AUDIT_SCHEMA",
+    "OUTCOME_SCHEMA",
+    "FORMAL_CLOSURE_SCHEMA",
+    "PRODUCER_RECEIPT_SCHEMA",
+    "RERUN_REPORT_SCHEMA",
+    "CLOSURE_REPORT_SCHEMA",
     "content_identity",
     "chain_sha256",
     "end_boundary",
@@ -103,4 +134,19 @@ __all__ = [
     "SUPPORTED_SEAL_SCHEMAS",
     "read_seal",
     "verify_seal",
+    # outcome contract
+    "Outcome",
+    "validate_outcome",
+    "read_outcome",
+    "outcome_document",
+    "outcome_from_legacy",
+    "outcome_id",
+    # formal closure
+    "FormalClosure",
+    "validate_closure_record",
+    "read_producer_receipt",
+    "read_rerun_report",
+    "seal_formal_closure",
+    "load_formal_closure",
+    "validate_formal_closure",
 ]

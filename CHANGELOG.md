@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.2.0 — outcome and formal-closure contracts
+
+* Public `trajectory-core.outcome.v1` contract with `Outcome`,
+  `validate_outcome`, `read_outcome`, `outcome_document` and
+  `outcome_from_legacy`.  It separates the plan unit, measured progress,
+  one-cycle completion, declared-goal completion, run status,
+  termination/truncation reasons and verification status; missing facts stay
+  `unknown`, booleans are rejected where counts belong, contradictory
+  declarations fail, and `full_cycle` is never goal evidence.  The legacy
+  adapter reads `flags_to_complete` as the historical **rounds** field (one
+  round = two flags = twenty waves, never rescaled) and records its source,
+  input schema and evidence scope.
+* Formal producer closure (`trajectory-core.formal-closure.v1`) with
+  `FormalClosure`, `seal_formal_closure`, `load_formal_closure`,
+  `validate_formal_closure` and `validate_closure_record`, plus the
+  `producer-closure-receipt.v1` and `rerun-report.v1` documents.  The writer
+  and loader share one validation contract; missing, duplicated, omitted or
+  extra references, bad digests, unknown schemas, conflicting identities,
+  inventory changes, symlinks and path escapes all fail closed.  Existing
+  destinations are never overwritten, competing writers' files are never
+  deleted, and only an output this call created is cleaned up.
+* The closure report separates core-verified `content_integrity` from
+  `producer_attested_closure` and from the runtime claims core cannot prove.
+  A `synthetic: true` receipt is accepted only as a clearly marked fixture and
+  never presented as a live producer's proof.
+* Typed `OutcomeContractError` and `ClosureError`.
+* CLI: `adapt-outcome`, `seal-closure`, `verify-closure`.
+* Public synthetic two-branch + two-rerun example
+  (`examples/formal_closure_two_branches.py`), exercised by
+  `tools/check.py` from a clean installed wheel; the read-only inventory is
+  proven unchanged across verification.
+* `docs/outcome-closure-contract.md` records the contract authority, the
+  env/rollout producer responsibilities and the old-entry exit conditions.
+
 ## 0.1.0 — first public offline core
 
 * Installable `trajectory-core` package (import name `trajectory_core`) with no

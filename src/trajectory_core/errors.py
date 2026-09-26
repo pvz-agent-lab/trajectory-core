@@ -19,6 +19,12 @@ the failure classes the migration review asked to distinguish:
     paths, ``..`` traversal, drive/UNC prefixes or symlink escapes.
 ``SealError``
     A seal record or its bound artifacts cannot be re-derived.
+``OutcomeContractError``
+    A versioned outcome document is malformed, incomplete or contradicts
+    itself; unknown facts may never be turned into success claims.
+``ClosureError``
+    A formal closure record, its producer receipt, its rerun reports or the
+    package they bind are missing, duplicated, conflicting or changed.
 ``UnsupportedCapabilityError``
     The requested operation is deliberately not implemented (for example a
     native-runtime replay).  It is never a silent success.
@@ -49,6 +55,14 @@ class PathContractError(EvidenceError):
 
 class SealError(EvidenceError):
     """A seal record disagrees with the artifacts it binds."""
+
+
+class OutcomeContractError(EvidenceError):
+    """A versioned outcome document is malformed or self-contradictory."""
+
+
+class ClosureError(EvidenceError):
+    """A formal closure record cannot be closed over the package it binds."""
 
 
 class UnsupportedCapabilityError(TrajectoryCoreError):

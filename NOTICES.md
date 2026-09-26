@@ -31,3 +31,15 @@ package imports only the Python standard library and itself.
 The adapted copies keep the original Apache-less/GPL-3.0 licensing: this
 repository is a redistribution of that code under the same license, with the
 original project credited above.
+
+## Original modules in this repository
+
+`outcome.py`, `closure.py` and the `tests/support/formal_demo.py` fixture are
+original work of this repository, not adapted legacy code.  They document and
+implement the completion/closure semantics agreed in
+[`guajun/llm-vs-zombies#104`](https://github.com/guajun/llm-vs-zombies/issues/104)
+and [`#97`](https://github.com/guajun/llm-vs-zombies/issues/97) but copy no
+legacy implementation: the legacy readers remain the single source of the old
+hashes and format parsing.  `tests/support/formal_demo.py` reuses the test-only
+synthetic recorder described above; no game, runtime or private recording is
+involved.

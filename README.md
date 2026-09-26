@@ -87,6 +87,48 @@ non-object entries and entries missing required fields raise `SealError`
 instead of being silently overwritten or dropped. An empty `reports` list is
 valid: the seal may bind the tree without binding a report.
 
+## Outcome contract and formal closure
+
+```python
+import trajectory_core as tc
+
+# Adapt a pre-migration plan/case pair without changing its historical unit.
+outcome = tc.outcome_from_legacy(plan_json, case_json, source="runs/issue97", expected_scene=3)
+print(outcome.plan_rounds, outcome.cycle_completed, outcome.goal_reached)
+
+# Bind a complete experimental family: tree + outcomes + rerun reports +
+# producer receipt + the immutable input inventory.
+closure = tc.seal_formal_closure(
+    "stage", "stage/closure.json",
+    tree="tree",
+    outcomes={"root": "outcomes/root.json", "branch": "outcomes/branch.json"},
+    pairs=[{"id": "branch-rerun", "baseline": "root", "rerun": "branch", "report": "reports/branch.json"}],
+    receipt="receipt.json",
+)
+report = tc.load_formal_closure("stage/closure.json").report()
+print(report["content_integrity"]["status"])          # verified: re-derived from bytes
+print(report["producer_attested_closure"]["synthetic"])  # true for a fixture receipt
+```
+
+The outcome schema keeps the plan unit, the measured progress, one-cycle
+completion, target completion, run status, termination/truncation and
+verification separate; unknown facts stay unknown and a complete cycle is never
+read as goal completion.  The formal closure is a *producer protocol*, not a
+process check: the producer supplies the receipt (a `synthetic: true` receipt
+is a fixture, never runtime proof), and the report separates what core proved
+from bytes, what the producer attested, and what core cannot prove.
+
+A self-contained synthetic demo (two branches, two rerun reports, formal
+sealing and read-only verification) lives in
+[`examples/formal_closure_two_branches.py`](examples/formal_closure_two_branches.py):
+
+```console
+python examples/formal_closure_two_branches.py WORKSPACE --support tests
+```
+
+See [docs/outcome-closure-contract.md](docs/outcome-closure-contract.md) for the
+full contract, the responsibility split and the old-entry exit conditions.
+
 ## CLI
 
 ```console
@@ -96,6 +138,12 @@ trajectory-core validate-tree PATH
 trajectory-core inspect-tree PATH           # index-only projection
 trajectory-core verify-seal SEAL --source-root DIR [--structure-only]
 trajectory-core export TREE OUTPUT.zip      # deterministic ZIP, refuses to overwrite
+trajectory-core adapt-outcome PLAN CASE [--expected-scene N]
+trajectory-core seal-closure ROOT DEST --tree PATH --receipt PATH \
+    --outcome KEY=PATH --pair ID BASELINE RERUN REPORT
+    # writes a formal closure; never overwrites
+    # (repeat --outcome once per node and --pair once per baseline/rerun pair)
+trajectory-core verify-closure CLOSURE [--root DIR]
 ```
 
 `package_tree` and `export_tree` apply the same full public validation as the
@@ -138,14 +186,20 @@ The tests build all fixtures themselves from a synthetic, socket-free recorder
 Negative cases cover tampering, missing files, unknown schemas, broken chains,
 duplicate identities, cross-root links, wrong parent boundaries, unsealed
 recordings, truncation, path traversal and read-only source inventories.
+Outcome and closure cases additionally cover boolean-as-count rejection,
+contradictory cycle/goal declarations, receipt scope conflicts, duplicated or
+omitted bindings, inventory changes during sealing, competing writers and
+failure cleanup.
 
 ## Layout
 
 ```text
-src/trajectory_core/          public API, CLI, path contract, seal verification
+src/trajectory_core/          public API, CLI, path contract, outcome and closure contracts
 src/trajectory_core/legacy_lvz/
                               adapted old readers and validators (see NOTICES.md)
 tests/                        synthetic fixtures, behavior and negative tests
+examples/                     installed-package formal-closure demo
+docs/                         the outcome/closure contract and responsibility split
 tools/check.py                the single required check entry point
 ```
 

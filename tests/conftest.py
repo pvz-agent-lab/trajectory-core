@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 import trajectory_core as tc
+from support.formal_demo import build_formal_demo
 from support.synthetic import record_session
 
 
@@ -62,6 +63,13 @@ def lab(tmp_path_factory: pytest.TempPathFactory) -> dict:
         "end": end,
         "identity": root_identity,
     }
+
+
+@pytest.fixture(scope="session")
+def formal_lab(tmp_path_factory: pytest.TempPathFactory) -> dict:
+    """One synthetic two-branch + two-rerun formal closure package."""
+    workspace = tmp_path_factory.mktemp("formal-closure-lab")
+    return build_formal_demo(workspace)
 
 
 def read_json(path: str | Path) -> dict:
