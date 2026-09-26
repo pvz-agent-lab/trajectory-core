@@ -1,0 +1,15 @@
+# local verification workspace: private evidence reports and generated fixtures
+work/
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+build/
+dist/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/

@@ -1,0 +1,90 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "trajectory-core"
+version = "0.1.0"
+description = "Offline lvz trajectory and evidence-tree contracts, readers and validation"
+readme = "README.md"
+license = "GPL-3.0-only"
+license-files = ["LICENSE"]
+requires-python = ">=3.11"
+dependencies = []
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Testing",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "ruff>=0.6",
+    "mypy>=1.11",
+    "build>=1.2",
+]
+
+[project.scripts]
+trajectory-core = "trajectory_core.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+trajectory_core = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+pythonpath = ["src", "tools"]
+filterwarnings = ["error"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+src = ["src", "tests", "tools"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+# The adapted legacy closure keeps the old module structure; a few rewrite
+# suggestions are noise there. Everything else is checked like new code.
+[tool.ruff.lint.per-file-ignores]
+"src/trajectory_core/legacy_lvz/*.py" = [
+    "E501",   # long explanatory comments and error messages from the old reader
+    "SIM102", # the old decoders keep deliberately nested guards
+    "SIM108", # ternaries were chosen for readability in the old code
+    "SIM211", # the old code writes `x if c else False` on purpose
+    "B007",   # loop variables retained for readability in the old decoders
+    "B023",   # closures in the old decoders capture loop state intentionally
+    "B905",   # zip() inputs are checked for equal length before the loop
+    "E731",   # the old dispatcher tables use named lambdas
+]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["src/trajectory_core"]
+mypy_path = "src"
+strict = true
+warn_unreachable = true
+# The public API is checked under strict settings. The vendored legacy closure
+# is allowed to keep its historical dynamic style: it is a byte-level reader
+# whose behavior is pinned by fixtures, not by annotations. See NOTICES.md.
+[[tool.mypy.overrides]]
+module = ["trajectory_core.legacy_lvz.*"]
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+disallow_untyped_calls = false
+disallow_any_generics = false
+disallow_subclassing_any = false
+no_implicit_reexport = false
+warn_return_any = false
+warn_unreachable = false
+# The legacy closure reads untyped JSON with long dynamic expressions. These
+# six diagnostics describe annotations that were never there; keeping them off
+# leaves real name/import/schema mistakes checked. See NOTICES.md.
+disable_error_code = ["union-attr", "index", "operator", "arg-type", "var-annotated", "assignment"]
