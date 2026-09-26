@@ -21,9 +21,11 @@ independent axis that distinguishes a failure before any execution from a
 failure after partial execution and from a completed invocation; zero
 completed rounds is a recorded count and does not prove that nothing ran, so
 an unproven extent stays ``"unknown"``.  For legacy evidence the extent is
-proven by the source stage only (an actual completed-round delta or the
-source play loop's ``full_cycle_completed`` outcome); the case/suite
-lifecycle status and an absolute wave are not execution evidence.  The v2
+proven by the source stage only (the source play loop's
+``full_cycle_completed`` outcome, the historical ``startup_failed`` marker,
+or a completed-round delta together with a documented explicit
+premature-stop/truncation outcome); the case/suite lifecycle status, an
+absolute wave and a progress delta alone are not execution evidence.  The v2
 contract is the first published shape; v1 drafts were never released and are
 rejected as unknown schemas.
 
@@ -60,6 +62,11 @@ PROVENANCE_KINDS = frozenset({"native", "legacy-adapted", "synthetic-demo"})
 CYCLE_WAVE_MINIMUM = 20
 # Truncation reasons the legacy runner can stop a source run with.
 TRUNCATION_REASONS = frozenset({"tick_budget_exhausted", "wall_budget_exhausted", "disk_reserve_stop"})
+# Documented source play-loop outcomes that explicitly name a stop before the
+# configured full-cycle end.  A positive completed-round delta proves only
+# that execution started, so it is ``partial`` only together with one of
+# these; any other outcome (including an unrecognized string) stays unknown.
+INCOMPLETE_SOURCE_OUTCOMES = frozenset({"terminal_before_complete"}) | TRUNCATION_REASONS
 LEGACY_RUN_STATUSES = {
     "completed": "completed",
     "failed": "failed",
@@ -518,19 +525,22 @@ def _legacy_execution_extent(status: str | None, progress: Mapping[str, Any], so
     is its configured end and therefore proves ``complete``.  A positive
     ``maximum_wave`` is *not* proof of execution: the historical runner
     initializes it from the loaded initial observation, so a saved state can
-    already be on wave 1 or later.  Only the ``rounds_completed`` delta (final
-    minus initial completed rounds) proves advancement, and it proves
-    ``partial`` because an early-terminated or truncated run can still record
-    completed rounds.  A truncation reason alone proves nothing (a budget can
-    stop before the first action).  Everything else stays ``unknown``;
-    callers that know more must declare the extent explicitly.
+    already be on wave 1 or later.  A positive ``rounds_completed`` delta
+    (final minus initial completed rounds) proves execution started, but not
+    that it stopped early: a complete source with a missing reason must stay
+    ``unknown``.  Only the delta together with a documented explicit
+    premature-stop/truncation source outcome proves ``partial``.  A
+    truncation reason alone proves nothing (a budget can stop before the
+    first action), and an unrecognized outcome string is not proof.
+    Everything else stays ``unknown``; callers that know more must declare
+    the extent explicitly.
     """
     if status == "startup_failed":
         return "not_executed"
     if source_outcome == "full_cycle_completed":
         return "complete"
     rounds = progress["rounds_completed"]
-    if rounds is not None and rounds >= 1:
+    if rounds is not None and rounds >= 1 and source_outcome in INCOMPLETE_SOURCE_OUTCOMES:
         return "partial"
     return "unknown"
 
@@ -554,9 +564,12 @@ def outcome_from_legacy(
     ``execution_extent`` is derived from the source-stage facts when the caller
     does not declare it (``startup_failed`` -> ``not_executed``; the source
     play loop's ``full_cycle_completed`` outcome -> ``complete``; a positive
-    completed-round delta -> ``partial``; otherwise ``unknown``).  The
-    case/suite lifecycle status and an absolute wave are not execution
-    evidence; an explicit value must satisfy the outcome contract.
+    completed-round delta together with a documented explicit
+    premature-stop/truncation outcome -> ``partial``; otherwise
+    ``unknown``).  The case/suite lifecycle status and an absolute wave are
+    not execution evidence, and a progress delta without a documented
+    premature stop is not proof that execution stopped early; an explicit
+    value must satisfy the outcome contract.
     """
     if not isinstance(case, Mapping):
         raise OutcomeContractError("legacy case report must be an object")

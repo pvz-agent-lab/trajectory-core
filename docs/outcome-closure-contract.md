@@ -98,12 +98,17 @@ particular:
   suite while the source outcome carries the real end.  `startup_failed`
   (the source run never existed) proves `not_executed`; the source play
   loop's own `outcome: full_cycle_completed` (its configured end) proves
-  `complete`; a positive `rounds_completed` delta proves `partial`, because
-  an early-terminated or truncated source run can still record completed
-  rounds.  A positive absolute `maximum_wave`, a recorded truncation reason
-  alone, or any other fact leaves the extent `unknown`.  Callers that know
-  more (for example a producer that observed a failure inside the first
-  round) pass `execution_extent="partial"` explicitly.
+  `complete`; a positive `rounds_completed` delta proves only that
+  execution started, so it becomes `partial` only together with a documented
+  explicit premature-stop/truncation source outcome (`terminal_before_complete`
+  or one of `tick_budget_exhausted` / `wall_budget_exhausted` /
+  `disk_reserve_stop`).  A positive delta with an absent, unknown or
+  arbitrary outcome stays `unknown`: a complete source with a missing reason
+  is possible, and an arbitrary non-null string is not proof.  A positive
+  absolute `maximum_wave`, a recorded truncation reason alone, or any other
+  fact likewise leaves the extent `unknown`.  Callers that know more (for
+  example a producer that observed a failure inside the first round) pass
+  `execution_extent="partial"` explicitly.
 
 ## 2. Formal producer closure (`trajectory-core.formal-closure.v2`)
 

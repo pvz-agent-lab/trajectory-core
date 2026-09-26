@@ -245,6 +245,28 @@ def test_startup_failure_with_only_an_initial_wave_is_not_executed() -> None:
     assert outcome.execution_extent == "not_executed"
 
 
+def test_positive_round_delta_without_a_source_outcome_stays_unknown() -> None:
+    """Progress proves execution started, not that execution stopped early."""
+    absent = adapt(legacy_plan(), legacy_case(outcome=None))
+    assert absent.rounds_completed == 1
+    assert absent.termination_reason is None
+    assert absent.execution_extent == "unknown"
+    # An unrecognized non-null outcome is not proof of a premature stop either.
+    unknown = adapt(legacy_plan(), legacy_case(outcome="mystery_outcome"))
+    assert unknown.rounds_completed == 1
+    assert unknown.termination_reason == "mystery_outcome"
+    assert unknown.execution_extent == "unknown"
+
+
+def test_positive_round_delta_with_a_documented_premature_stop_is_partial() -> None:
+    terminal = adapt(legacy_plan(), legacy_case(status="failed", outcome="terminal_before_complete"))
+    assert terminal.execution_extent == "partial"
+    assert terminal.termination_reason == "terminal_before_complete"
+    truncated = adapt(legacy_plan(), legacy_case(status="failed", outcome="tick_budget_exhausted"))
+    assert truncated.execution_extent == "partial"
+    assert truncated.truncation_reason == "tick_budget_exhausted"
+
+
 def test_a_truncated_run_is_partial_not_complete() -> None:
     truncated = adapt(legacy_plan(), legacy_case(status="incomplete", outcome="tick_budget_exhausted"))
     assert truncated.run_status == "aborted"
