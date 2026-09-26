@@ -60,11 +60,16 @@ Strict validation rules (all failures are `OutcomeContractError` or
   invocation can report `goal.reached = false`, and `run.execution_extent`
   is an independent axis: `complete` says the invocation ran to its configured
   end, not that the target was reached;
-* `run.execution_extent = "not_executed"` contradicts recorded progress
-  (a completed round or a positive maximum wave), and
-  `run.execution_extent = "complete"` contradicts a recorded truncation
-  reason; an unproven extent stays `"unknown"` — a `0` completed-round count
-  cannot distinguish a failure before execution from a partial first round;
+* `run.execution_extent = "not_executed"` contradicts an actual advancement
+  delta (`progress.rounds_completed > 0`), and `run.execution_extent =
+  "complete"` contradicts a recorded truncation reason; an unproven extent
+  stays `"unknown"` — a `0` completed-round count cannot distinguish a
+  failure before execution from a partial first round.  A positive
+  `progress.maximum_wave` (or `final_scene`) is not advancement: the
+  historical runner initializes `maximum_wave` from the loaded initial
+  observation, so a saved state can already be on wave 1 or later, and a
+  truncation reason alone proves nothing because a budget can stop before the
+  first action;
 * `synthetic-demo` and `legacy-adapted` documents cannot claim
   `verification.status = "verified"`.
 
@@ -85,12 +90,20 @@ particular:
 * `tick_budget_exhausted` / `wall_budget_exhausted` / `disk_reserve_stop`
   become `run.truncation_reason`; other outcomes become
   `run.termination_reason`;
-* `run.execution_extent` is derived conservatively unless the caller declares
-  it: `startup_failed` proves `not_executed`; a completed status without a
-  truncation proves `complete`; a failed or incomplete status proves `partial`
-  only when progress or a truncation reason is recorded; everything else stays
-  `unknown`.  Callers that know more (for example a producer that observed a
-  failure inside the first round) pass `execution_extent="partial"` explicitly.
+* `run.execution_extent` describes the **source execution** and is derived
+  from proven source-stage facts unless the caller declares it.  It never
+  follows the case/suite lifecycle: the historical suite marks a case
+  `failed` after a later cold replay or retention failure even though the
+  source play loop already completed, and marks it `incomplete` for a strict
+  suite while the source outcome carries the real end.  `startup_failed`
+  (the source run never existed) proves `not_executed`; the source play
+  loop's own `outcome: full_cycle_completed` (its configured end) proves
+  `complete`; a positive `rounds_completed` delta proves `partial`, because
+  an early-terminated or truncated source run can still record completed
+  rounds.  A positive absolute `maximum_wave`, a recorded truncation reason
+  alone, or any other fact leaves the extent `unknown`.  Callers that know
+  more (for example a producer that observed a failure inside the first
+  round) pass `execution_extent="partial"` explicitly.
 
 ## 2. Formal producer closure (`trajectory-core.formal-closure.v2`)
 

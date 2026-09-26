@@ -12,8 +12,11 @@
   declarations fail, `full_cycle` is never goal evidence and a completed
   invocation is never goal success.  The legacy adapter reads
   `flags_to_complete` as the historical **rounds** field (one round = two
-  flags = twenty waves, never rescaled), derives the execution extent
-  conservatively, and records its source, input schema and evidence scope.
+  flags = twenty waves, never rescaled), derives the execution extent from
+  proven source-stage facts only (a completed-round delta, or the source
+  play loop's `full_cycle_completed` outcome; the case lifecycle status and
+  an absolute wave prove nothing), and records its source, input schema and
+  evidence scope.
 * Formal producer closure (`trajectory-core.formal-closure.v2`) with
   `FormalClosure`, `seal_formal_closure`, `load_formal_closure`,
   `validate_formal_closure` and `validate_closure_record`, plus the

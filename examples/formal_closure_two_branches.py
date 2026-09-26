@@ -63,8 +63,8 @@ def main(argv: list[str] | None = None) -> int:
     intervention = demo["outcomes"]["issue3-intervention-a"]
     if intervention.cycle_completed is not True or intervention.goal_reached is not False:
         raise SystemExit("the demo's full-cycle-without-goal outcome was not reproduced")
-    if intervention.run_status != "completed" or intervention.execution_extent != "complete":
-        raise SystemExit("the completed invocation's execution extent was not preserved")
+    if intervention.run_status != "completed" or intervention.execution_extent != "partial":
+        raise SystemExit("the completed suite's one-of-two-round source execution was not preserved as partial")
     if report["profile"] != tc.CONTROLLED_FAMILY_PROFILE:
         raise SystemExit("the report does not name the controlled-family profile")
     if report["producer_attested_closure"]["attested"] is not False:

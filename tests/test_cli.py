@@ -97,7 +97,7 @@ def test_adapt_outcome_cli(formal_lab: dict, tmp_path: Path) -> None:
     assert outcome["plan"] == {"unit": "round", "rounds": 2}
     assert outcome["cycle"]["completed"] is True
     assert outcome["goal"]["reached"] is False
-    assert outcome["run"]["execution_extent"] == "complete"
+    assert outcome["run"]["execution_extent"] == "partial"
     assert outcome["provenance"]["kind"] == "legacy-adapted"
 
     plan.write_text('{"schema": "lvz.evaluation-plan.v99"}\n', encoding="utf-8")

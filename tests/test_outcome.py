@@ -175,16 +175,19 @@ def test_legacy_statuses_map_to_the_public_run_status() -> None:
     completed = adapt(legacy_plan(), legacy_case(status="completed"))
     assert completed.run_status == "completed"
     assert completed.execution_extent == "complete"
+    # The source play loop's own full_cycle_completed outcome proves the source
+    # execution finished; case.status=failed only records a later suite failure
+    # (for example a failed cold replay), so it must not downgrade the extent.
     failed = adapt(legacy_plan(), legacy_case(status="failed"))
     assert failed.run_status == "failed"
-    assert failed.execution_extent == "partial"
+    assert failed.execution_extent == "complete"
     startup_failed = adapt(
         legacy_plan(),
         legacy_case(status="startup_failed", rounds_completed=None, maximum_wave=None, full_cycle=None),
     )
     assert startup_failed.run_status == "failed"
     assert startup_failed.execution_extent == "not_executed"
-    incomplete = adapt(legacy_plan(), legacy_case(status="incomplete"))
+    incomplete = adapt(legacy_plan(), legacy_case(status="incomplete", outcome="terminal_before_complete"))
     assert incomplete.run_status == "aborted"
     assert incomplete.execution_extent == "partial"
 
@@ -194,6 +197,15 @@ def test_a_startup_failure_with_recorded_progress_is_rejected() -> None:
         adapt(legacy_plan(), legacy_case(status="startup_failed"))
 
 
+def test_source_execution_extent_is_independent_of_the_case_lifecycle() -> None:
+    """The documented repro: the source loop completed, then a cold replay failed."""
+    outcome = adapt(legacy_plan(), legacy_case(status="failed", replays_skipped="failed cold replay"))
+    assert outcome.run_status == "failed"
+    assert outcome.execution_extent == "complete"
+    assert outcome.cycle_completed is True
+    assert outcome.goal_reached is True
+
+
 def test_failure_before_execution_is_distinct_from_failure_after_partial_execution() -> None:
     before = adapt(
         legacy_plan(),
@@ -201,17 +213,36 @@ def test_failure_before_execution_is_distinct_from_failure_after_partial_executi
     )
     assert before.run_status == "failed"
     assert before.execution_extent == "not_executed"
-    after = adapt(legacy_plan(), legacy_case(status="failed", rounds_completed=1))
+    after = adapt(
+        legacy_plan(),
+        legacy_case(status="failed", outcome="terminal_before_complete", rounds_completed=1),
+    )
     assert after.run_status == "failed"
     assert after.execution_extent == "partial"
     # Zero completed rounds cannot prove that nothing ran: the first round may
-    # have been partial and unrecorded, so the extent must stay unknown.
+    # have been partial and unrecorded, and a positive absolute wave can be
+    # only the loaded initial state, so the extent must stay unknown.
     ambiguous = adapt(
         legacy_plan(),
-        legacy_case(status="failed", rounds_completed=0, maximum_wave=0, full_cycle=None),
+        legacy_case(
+            status="failed",
+            outcome="terminal_before_complete",
+            rounds_completed=0,
+            maximum_wave=1,
+            full_cycle=None,
+        ),
     )
     assert ambiguous.run_status == "failed"
     assert ambiguous.execution_extent == "unknown"
+
+
+def test_startup_failure_with_only_an_initial_wave_is_not_executed() -> None:
+    outcome = adapt(
+        legacy_plan(),
+        legacy_case(status="startup_failed", outcome=None, rounds_completed=0, maximum_wave=1, full_cycle=None),
+    )
+    assert outcome.run_status == "failed"
+    assert outcome.execution_extent == "not_executed"
 
 
 def test_a_truncated_run_is_partial_not_complete() -> None:
@@ -221,10 +252,27 @@ def test_a_truncated_run_is_partial_not_complete() -> None:
     assert truncated.truncation_reason == "tick_budget_exhausted"
 
 
+def test_truncation_alone_is_not_execution_evidence() -> None:
+    truncated = adapt(
+        legacy_plan(),
+        legacy_case(
+            status="failed",
+            outcome="tick_budget_exhausted",
+            rounds_completed=0,
+            maximum_wave=1,
+            full_cycle=None,
+        ),
+    )
+    assert truncated.truncation_reason == "tick_budget_exhausted"
+    assert truncated.execution_extent == "unknown"
+
+
 def test_completed_invocation_with_an_unmet_goal_is_not_success() -> None:
     outcome = adapt(legacy_plan(flags_to_complete=2), legacy_case(outcome="terminal_before_complete"))
     assert outcome.run_status == "completed"
-    assert outcome.execution_extent == "complete"
+    # One of the two declared rounds completed before the terminal: the suite
+    # lifecycle completed, but the source execution is only partial.
+    assert outcome.execution_extent == "partial"
     assert outcome.cycle_completed is True
     assert outcome.goal_reached is False
 
@@ -232,11 +280,20 @@ def test_completed_invocation_with_an_unmet_goal_is_not_success() -> None:
 def test_explicit_execution_extent_must_satisfy_the_contract() -> None:
     declared = adapt(
         legacy_plan(),
-        legacy_case(status="failed", rounds_completed=0, full_cycle=None),
+        legacy_case(status="failed", outcome=None, rounds_completed=0, full_cycle=None),
         execution_extent="partial",
     )
     assert declared.execution_extent == "partial"
     assert any("caller declared execution extent" in note for note in declared.provenance["adaptations"])
+    # A loaded initial wave is not advancement: explicitly declaring
+    # not_executed with rounds_completed=0 is accepted even at wave >= 1.
+    before = adapt(
+        legacy_plan(),
+        legacy_case(status="failed", outcome=None, rounds_completed=0, maximum_wave=1, full_cycle=None),
+        execution_extent="not_executed",
+    )
+    assert before.run_status == "failed"
+    assert before.execution_extent == "not_executed"
     with pytest.raises(tc.OutcomeContractError, match="execution_extent"):
         adapt(legacy_plan(), legacy_case(), execution_extent="teleported")
 
@@ -261,6 +318,22 @@ def test_execution_extent_contradictions_are_rejected() -> None:
             provenance_kind="native",
             provenance_source="unit-test",
         )
+
+
+def test_not_executed_allows_a_loaded_initial_wave() -> None:
+    """maximum_wave is an absolute fact; only a round delta proves advancement."""
+    document = tc.outcome_document(
+        plan_unit="round",
+        plan_rounds=1,
+        rounds_completed=0,
+        maximum_wave=3,
+        run_status="failed",
+        execution_extent="not_executed",
+        provenance_kind="native",
+        provenance_source="unit-test",
+    )
+    assert document["run"]["execution_extent"] == "not_executed"
+    assert document["progress"]["maximum_wave"] == 3
 
 
 def test_truncation_reasons_stay_separate_from_termination() -> None:

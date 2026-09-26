@@ -20,9 +20,12 @@ still report ``goal.reached = false``.  ``run.execution_extent`` is an
 independent axis that distinguishes a failure before any execution from a
 failure after partial execution and from a completed invocation; zero
 completed rounds is a recorded count and does not prove that nothing ran, so
-an unproven extent stays ``"unknown"``.  The v2 contract is the first
-published shape; v1 drafts were never released and are rejected as unknown
-schemas.
+an unproven extent stays ``"unknown"``.  For legacy evidence the extent is
+proven by the source stage only (an actual completed-round delta or the
+source play loop's ``full_cycle_completed`` outcome); the case/suite
+lifecycle status and an absolute wave are not execution evidence.  The v2
+contract is the first published shape; v1 drafts were never released and are
+rejected as unknown schemas.
 
 The legacy adapter (:func:`outcome_from_legacy`) interprets a pre-migration
 ``lvz.evaluation-plan.v1/v2`` document plus a case report without changing the
@@ -214,16 +217,13 @@ def validate_outcome(document: Any) -> dict[str, Any]:
     truncation = _require_text(run["truncation_reason"], "run.truncation_reason", allow_none=True)
     if truncation is not None and truncation not in TRUNCATION_REASONS:
         raise OutcomeContractError(f"run.truncation_reason must be one of {sorted(TRUNCATION_REASONS)} or null")
-    if execution_extent == "not_executed":
-        executed = []
-        if progress["rounds_completed"]:
-            executed.append("progress.rounds_completed")
-        if progress["maximum_wave"]:
-            executed.append("progress.maximum_wave")
-        if executed:
-            raise OutcomeContractError(
-                f"run.execution_extent='not_executed' contradicts recorded progress ({', '.join(executed)})"
-            )
+    # Only an actual advancement delta contradicts "nothing ran": a positive
+    # absolute wave or scene can be only the loaded initial state, so it is not
+    # execution evidence.
+    if execution_extent == "not_executed" and progress["rounds_completed"]:
+        raise OutcomeContractError(
+            "run.execution_extent='not_executed' contradicts recorded progress (progress.rounds_completed)"
+        )
     if execution_extent == "complete" and truncation is not None:
         raise OutcomeContractError("run.execution_extent='complete' contradicts a recorded truncation_reason")
 
@@ -508,25 +508,29 @@ def _legacy_plan(document: Mapping[str, Any] | None) -> tuple[str | None, int | 
     return OUTCOME_UNIT, rounds, str(schema), adaptations
 
 
-def _legacy_execution_extent(status: str | None, progress: Mapping[str, Any], truncation: str | None) -> str:
-    """Derive only the execution extent the legacy facts actually prove.
+def _legacy_execution_extent(status: str | None, progress: Mapping[str, Any], source_outcome: str | None) -> str:
+    """Derive only the source execution extent the legacy facts actually prove.
 
-    ``startup_failed`` proves that no workload ran.  A completed status without
-    a truncation proves the invocation ran to its configured end, which says
-    nothing about goal success.  A failed or incomplete status proves partial
-    execution only when progress or a truncation reason is recorded; zero
-    completed rounds alone stays ``unknown`` because it cannot distinguish a
-    failure before execution from a partial first round.  Callers that know
-    more must declare the extent explicitly.
+    The extent describes the **source play loop**, not the suite/case
+    lifecycle; ``status`` is consulted only for the historical
+    ``startup_failed`` marker (the source run never existed, so nothing ran).
+    ``source_outcome`` is the play loop's own verdict: ``full_cycle_completed``
+    is its configured end and therefore proves ``complete``.  A positive
+    ``maximum_wave`` is *not* proof of execution: the historical runner
+    initializes it from the loaded initial observation, so a saved state can
+    already be on wave 1 or later.  Only the ``rounds_completed`` delta (final
+    minus initial completed rounds) proves advancement, and it proves
+    ``partial`` because an early-terminated or truncated run can still record
+    completed rounds.  A truncation reason alone proves nothing (a budget can
+    stop before the first action).  Everything else stays ``unknown``;
+    callers that know more must declare the extent explicitly.
     """
-    rounds = progress["rounds_completed"]
-    wave = progress["maximum_wave"]
-    ran = (rounds is not None and rounds >= 1) or (wave is not None and wave >= 1)
     if status == "startup_failed":
         return "not_executed"
-    if status == "completed":
-        return "partial" if truncation is not None else "complete"
-    if status in {"failed", "incomplete"} and (ran or truncation is not None):
+    if source_outcome == "full_cycle_completed":
+        return "complete"
+    rounds = progress["rounds_completed"]
+    if rounds is not None and rounds >= 1:
         return "partial"
     return "unknown"
 
@@ -547,11 +551,12 @@ def outcome_from_legacy(
     ``legacy-adapted`` and ``unverified``, and it records the exact input schema
     and every semantic adaptation.  ``full_cycle`` is reported as
     ``cycle.completed`` only; the declared target is decided separately.
-    ``execution_extent`` is derived conservatively from the legacy facts when
-    the caller does not declare it (``startup_failed`` -> ``not_executed``,
-    a completed status -> ``complete``, a failed/incomplete status with known
-    progress or truncation -> ``partial``, otherwise ``unknown``); an explicit
-    value must satisfy the outcome contract.
+    ``execution_extent`` is derived from the source-stage facts when the caller
+    does not declare it (``startup_failed`` -> ``not_executed``; the source
+    play loop's ``full_cycle_completed`` outcome -> ``complete``; a positive
+    completed-round delta -> ``partial``; otherwise ``unknown``).  The
+    case/suite lifecycle status and an absolute wave are not execution
+    evidence; an explicit value must satisfy the outcome contract.
     """
     if not isinstance(case, Mapping):
         raise OutcomeContractError("legacy case report must be an object")
@@ -627,10 +632,13 @@ def outcome_from_legacy(
         "expected_scene": expected_scene,
     }
     if execution_extent is None:
-        execution_extent = _legacy_execution_extent(status, progress, truncation)
-        adaptations.append(f"legacy case status {status!r} implies execution extent {execution_extent!r}")
+        execution_extent = _legacy_execution_extent(status, progress, outcome_reason)
+        adaptations.append(f"legacy source facts imply execution extent {execution_extent!r}")
         if execution_extent == "unknown":
-            adaptations.append("the legacy case facts do not prove whether execution started; extent stays unknown")
+            adaptations.append(
+                "the legacy case facts do not prove that source execution started or reached its configured end; "
+                "extent stays unknown"
+            )
     else:
         adaptations.append(f"the caller declared execution extent {execution_extent!r}")
 

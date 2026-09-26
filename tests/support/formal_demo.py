@@ -88,8 +88,9 @@ def _legacy_outcome(
         expected_scene=3,
         evidence_scope="synthetic fixture values only; not a live game observation",
     )
+    expected_extent = "complete" if outcome == "full_cycle_completed" else "partial"
     assert adapted.goal_reached is goal_reached, adapted.document
-    assert adapted.execution_extent == "complete", adapted.document
+    assert adapted.execution_extent == expected_extent, adapted.document
     return adapted
 
 
